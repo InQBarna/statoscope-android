@@ -1,0 +1,19 @@
+# Build outputs (root project + every module: android/, testing/, ...)
+build/
+out/
+
+# Gradle
+.gradle/
+
+# Kotlin
+.kotlin/
+
+# IDE (Android Studio / IntelliJ) — regenerated on sync, nothing here needs sharing
+.idea/
+*.iml
+
+# Local machine config (absolute SDK path, per-developer)
+local.properties
+
+# macOS
+.DS_Store

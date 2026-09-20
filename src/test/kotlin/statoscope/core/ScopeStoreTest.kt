@@ -1,0 +1,218 @@
+//
+// ScopeStoreTest.kt
+// statoscope-kotlin
+//
+// Direct unit tests of the library's own core classes — not tutorial material, not extracted
+// into any doc. Mirrors Swift Statoscope's top-level Tests/StatoscopeTests/*.swift, kept
+// separate from Tests/StatoscopeTests/Examples/ there and from statoscope.examples here, so a
+// tutorial rewrite can never accidentally break the library's own correctness net or vice versa.
+//
+package statoscope.core
+
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+
+private data class TestState(val count: Int = 0, val marker: String = "initial")
+
+private sealed interface TestWhen {
+    data object Increment : TestWhen
+    data class MarkerSet(val value: String) : TestWhen
+}
+
+private val testConfig = ScopeConfig<TestState, TestWhen>(
+    initial = TestState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is TestWhen.Increment -> state.copy(count = state.count + 1)
+            is TestWhen.MarkerSet -> state.copy(marker = action.value)
+        }
+    }
+)
+
+private class FixedResultEffect(private val result: TestWhen) : Effect<TestWhen> {
+    override suspend fun run(): TestWhen = result
+}
+
+/** Like [testConfig], but Increment also enqueues an effect completing with a marker only the
+ *  effect's own completion could have produced — proof the effect actually ran, not just that
+ *  the synchronous part of update() did. */
+private val effectConfig = ScopeConfig<TestState, TestWhen>(
+    initial = TestState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is TestWhen.Increment -> {
+                effects.enqueue(FixedResultEffect(TestWhen.MarkerSet("effect-completed")))
+                state.copy(count = state.count + 1)
+            }
+            is TestWhen.MarkerSet -> state.copy(marker = action.value)
+        }
+    }
+)
+
+class ScopeStoreTest {
+
+    @Test
+    fun testInitialStateIsConfigInitial() {
+        val store = createScope(testConfig)
+        assertEquals(TestState(), store.state)
+    }
+
+    @Test
+    fun testStateFlowValueAlwaysMatchesStateAfterSend() {
+        val store = createScope(testConfig)
+
+        assertEquals(store.state, store.stateFlow.value)
+
+        store.send(TestWhen.Increment)
+
+        assertEquals(1, store.stateFlow.value.count, "stateFlow must reflect a synchronous send()")
+        assertEquals(store.state, store.stateFlow.value)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testStateFlowEmitsWhenAnEffectCompletionUpdatesState() = runTest {
+        scopeEffectsDisabledInUnitTests = false
+        val store = createScope(effectConfig, effectScope = this)
+
+        val seenMarkers = mutableListOf<String>()
+        val collector = launch { store.stateFlow.collect { seenMarkers += it.marker } }
+
+        store.send(TestWhen.Increment)
+        advanceUntilIdle()
+        collector.cancel()
+
+        // Only the effect's own completion event could have produced this — proves a collector
+        // sees the async, effect-driven update, not just the synchronous part of send().
+        assertTrue(seenMarkers.contains("effect-completed"), "expected stateFlow to emit the effect-driven marker, got: $seenMarkers")
+    }
+
+    @Test
+    fun testSendUpdatesStateWithoutMiddleware() {
+        val store = createScope(testConfig)
+        store.send(TestWhen.Increment)
+        assertEquals(1, store.state.count)
+    }
+
+    @Test
+    fun testAddMiddlewareReturnsSameStore() {
+        val store = createScope(testConfig)
+        val returned = store.addMiddleware { _, action, forward -> forward(action) }
+        assertSame(store, returned)
+    }
+
+    @Test
+    fun testMiddlewareCanBlockAnEventByNeverCallingForward() {
+        val store = createScope(testConfig)
+            .addMiddleware { _, _, _ -> /* never calls forward: the event is blocked */ }
+
+        store.send(TestWhen.Increment)
+
+        assertEquals(0, store.state.count, "Blocked event must never reach update()")
+    }
+
+    // scopeEffectsDisabledInUnitTests defaults to true under JUnit (see ScopeStore.kt) so an
+    // app-level test calling createScope(...) directly doesn't accidentally run real effects.
+    // This test's whole point is proving effect execution genuinely works, so it opts back in —
+    // exactly the setUp/tearDown pattern Swift's own StoreEffectsTests.swift uses around its
+    // identical scopeEffectsDisabledInUnitTests flag.
+    @BeforeTest
+    fun enableRealEffects() {
+        scopeEffectsDisabledInUnitTests = false
+    }
+
+    @AfterTest
+    fun restoreEffectsDisabled() {
+        scopeEffectsDisabledInUnitTests = true
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testEnqueuedEffectActuallyRunsAndFeedsBackResult() = runTest {
+        // Passing this test's own TestScope as effectScope lets advanceUntilIdle() below
+        // deterministically drive the effect's coroutine to completion — no real delay, no
+        // flaky polling.
+        val store = createScope(effectConfig, effectScope = this)
+
+        store.send(TestWhen.Increment)
+        // The synchronous part of update() has run; the effect it enqueued has not yet.
+        assertEquals(1, store.state.count)
+        assertEquals("initial", store.state.marker)
+
+        advanceUntilIdle()
+
+        // Only the effect's own completion event could have produced this value.
+        assertEquals("effect-completed", store.state.marker)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testEffectDoesNotRunWhenDisabledInUnitTests() = runTest {
+        scopeEffectsDisabledInUnitTests = true // the actual default; set explicitly for clarity
+
+        val store = createScope(effectConfig, effectScope = this)
+        store.send(TestWhen.Increment)
+        advanceUntilIdle()
+
+        assertEquals(1, store.state.count, "the synchronous part of update() still ran")
+        assertEquals("initial", store.state.marker, "the enqueued effect must never have been launched")
+    }
+
+    @Test
+    fun testEffectCompletionsAlwaysArriveOnTheSameDedicatedThread() {
+        scopeEffectsDisabledInUnitTests = false
+
+        // Thread.currentThread().id (a stable OS-thread identity), not .name, proves this —
+        // kotlinx.coroutines' debug mode (auto-enabled by Gradle's -ea) suffixes the thread's
+        // *name* with " @coroutine#N" per coroutine, so two completions on the very same
+        // physical thread can still show different names.
+        val threadIds = ConcurrentLinkedQueue<Long>()
+        var oneThreadName: String? = null
+        val bothCompleted = CountDownLatch(2)
+        val config = ScopeConfig<TestState, TestWhen>(
+            initial = TestState(),
+            update = { state, action, effects, _ ->
+                when (action) {
+                    is TestWhen.Increment -> {
+                        effects.enqueue(object : Effect<TestWhen> {
+                            override suspend fun run(): TestWhen {
+                                threadIds += Thread.currentThread().threadId()
+                                oneThreadName = Thread.currentThread().name
+                                bothCompleted.countDown()
+                                return TestWhen.MarkerSet("done")
+                            }
+                        })
+                        state.copy(count = state.count + 1)
+                    }
+                    is TestWhen.MarkerSet -> state.copy(marker = action.value)
+                }
+            }
+        )
+
+        // Uses the real default effectScope (defaultEffectDispatcher), not a TestScope — the
+        // point is proving genuine cross-thread delivery lands on one consistent thread, which
+        // a virtual test dispatcher wouldn't demonstrate.
+        val store = createScope(config)
+        store.send(TestWhen.Increment)
+        store.send(TestWhen.Increment)
+
+        assertTrue(bothCompleted.await(2, TimeUnit.SECONDS), "both effects should have completed within 2s")
+        assertEquals(2, threadIds.size)
+        assertEquals(1, threadIds.toSet().size, "expected both effect completions on the same OS thread, got ids: $threadIds")
+        assertTrue(
+            oneThreadName?.startsWith("Statoscope-EffectDispatcher") == true,
+            "expected the dedicated dispatcher's thread name, got: $oneThreadName"
+        )
+    }
+}
