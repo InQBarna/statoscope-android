@@ -39,6 +39,7 @@ import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** Tutorial 04: the current time, injectable so tests can fix it. */
 class DateProvider(val currentDate: () -> Long)
 
@@ -58,6 +59,7 @@ import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 data class Favorite(val id: String, val dateAdded: Long)
 
 /**
@@ -87,6 +89,7 @@ import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 data class ArticleDto(val id: String, val title: String, val content: String)
 
 /**
@@ -118,6 +121,10 @@ load, and date plus persistence when a favorite is toggled — the network fetch
 effect (`NetworkFetchEffect`), the other two happen inline, exactly the same split Tutorial 02
 established between synchronous state changes and asynchronous results.
 
+`NetworkFetchEffect` itself returns `List<ArticleDto>` — its own natural result, not
+`NewsFeedListWhen` — the same `Effect<T>`/`.map(...)` split Tutorial 02 introduces; `.map(NewsFeedListWhen::NetworkFetchCompleted)`
+does the adapting at the enqueue site below.
+
 ```kotlin
 import kotlinx.coroutines.delay
 import statoscope.core.Dependencies
@@ -125,6 +132,7 @@ import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** Tutorial 04: a news feed reducer resolving all three dependencies declared above. */
 data class NewsFeedListState(
     val loading: Boolean = false,
@@ -138,9 +146,12 @@ sealed interface NewsFeedListWhen {
     data class UserTappedFavoriteButton(val id: String) : NewsFeedListWhen
 }
 
-class NetworkFetchEffect(private val network: NetworkProvider) : Effect<NewsFeedListWhen> {
-    override suspend fun run(): NewsFeedListWhen =
-        NewsFeedListWhen.NetworkFetchCompleted(network.fetchArticles())
+/**
+ * Returns its own natural result, `List<ArticleDto>` — not `NewsFeedListWhen` — same reasoning
+ * as Tutorial 02's `NetworkPostEffect`: `update` adapts it with `.map(...)` below.
+ */
+class NetworkFetchEffect(private val network: NetworkProvider) : Effect<List<ArticleDto>> {
+    override suspend fun run(): List<ArticleDto> = network.fetchArticles()
 }
 
 fun newsFeedListUpdate(
@@ -154,7 +165,7 @@ fun newsFeedListUpdate(
             val persistence = dependencies.resolve(PersistenceProviderKey)
             val network = dependencies.resolve(NetworkProviderKey)
 
-            effects.enqueue(NetworkFetchEffect(network))
+            effects.enqueue(NetworkFetchEffect(network).map(NewsFeedListWhen::NetworkFetchCompleted))
 
             state.copy(
                 loading = true,

@@ -4,6 +4,7 @@ import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** Tutorial 04: a news feed reducer resolving all three dependencies declared above. */
 data class NewsFeedListState(
     val loading: Boolean = false,
@@ -17,9 +18,12 @@ sealed interface NewsFeedListWhen {
     data class UserTappedFavoriteButton(val id: String) : NewsFeedListWhen
 }
 
-class NetworkFetchEffect(private val network: NetworkProvider) : Effect<NewsFeedListWhen> {
-    override suspend fun run(): NewsFeedListWhen =
-        NewsFeedListWhen.NetworkFetchCompleted(network.fetchArticles())
+/**
+ * Returns its own natural result, `List<ArticleDto>` — not `NewsFeedListWhen` — same reasoning
+ * as Tutorial 02's `NetworkPostEffect`: `update` adapts it with `.map(...)` below.
+ */
+class NetworkFetchEffect(private val network: NetworkProvider) : Effect<List<ArticleDto>> {
+    override suspend fun run(): List<ArticleDto> = network.fetchArticles()
 }
 
 fun newsFeedListUpdate(
@@ -33,7 +37,7 @@ fun newsFeedListUpdate(
             val persistence = dependencies.resolve(PersistenceProviderKey)
             val network = dependencies.resolve(NetworkProviderKey)
 
-            effects.enqueue(NetworkFetchEffect(network))
+            effects.enqueue(NetworkFetchEffect(network).map(NewsFeedListWhen::NetworkFetchCompleted))
 
             state.copy(
                 loading = true,

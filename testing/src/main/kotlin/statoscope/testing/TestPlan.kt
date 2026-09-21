@@ -10,6 +10,7 @@ import statoscope.core.MapDependencies
 import statoscope.core.MutableEffectsState
 import statoscope.core.ScopeConfig
 import statoscope.core.StatoscopeInternalApi
+import statoscope.core.SuperstateKey
 
 /**
  * Fluent GIVEN/WHEN/THEN builder for testing a scope's behavior.
@@ -47,6 +48,7 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
     private var lastEnqueuedEffects: List<Effect<When>> = emptyList()
     private val steps = mutableListOf<() -> Unit>()
     private var provideOverride: List<Pair<InjectionKey<*>, Any?>>? = null
+    private val superstateOverrides = mutableMapOf<SuperstateKey<*>, Any?>()
     private val pendingMarker = PendingTestPlan()
     private var hasRun = false
 
@@ -55,10 +57,26 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
     }
 
     // Read fresh each time a step actually runs, not when on()/then() was called — so calling
-    // withProvide() any time before runTest() takes effect, regardless of call order relative
-    // to on()/then().
+    // withProvide()/withSuperstate() any time before runTest() takes effect, regardless of call
+    // order relative to on()/then().
     private val dependencies: Dependencies
-        get() = MapDependencies(provideOverride ?: config.provide)
+        get() {
+            val base = MapDependencies(provideOverride ?: config.provide)
+            val overrides = superstateOverrides
+            return object : Dependencies {
+                override fun <T> resolve(key: InjectionKey<T>): T = base.resolve(key)
+
+                @Suppress("UNCHECKED_CAST")
+                override fun <T> resolve(key: SuperstateKey<T>): T =
+                    if (overrides.containsKey(key)) overrides[key] as T
+                    else error(
+                        "No fake provided for $key — a reducer under test that resolves a " +
+                            "SuperstateKey needs withSuperstate(key, value) to stand in for the " +
+                            "ancestor TestPlan doesn't have (it tests one scope in isolation, not " +
+                            "a composed tree — see the real-Store integration test instead for that)."
+                    )
+            }
+        }
 
     /**
      * Overrides [ScopeConfig.provide] for this test run with test-only fakes — mirrors
@@ -69,6 +87,17 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
      */
     fun withProvide(entries: List<Pair<InjectionKey<*>, Any?>>): TestPlan<State, When> = apply {
         provideOverride = entries
+    }
+
+    /**
+     * Stands in for a [statoscope.core.SubScope.superstateKey] an ancestor would otherwise
+     * provide — needed to test, in isolation, a reducer whose `update()` resolves a
+     * [SuperstateKey]. `TestPlan` never builds a real composed tree (it runs `update` directly,
+     * bypassing [statoscope.core.ScopeStore] entirely — same reason effects never really run),
+     * so there's no real ancestor here to read from.
+     */
+    fun <T> withSuperstate(key: SuperstateKey<T>, value: T): TestPlan<State, When> = apply {
+        superstateOverrides[key] = value
     }
 
     /**

@@ -4,6 +4,7 @@ import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 data class Favorite(val id: String, val dateAdded: Long)
 
 /**

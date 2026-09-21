@@ -26,11 +26,13 @@ package statoscope.core
 typealias Reducer<State, When> = (state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies) -> State
 
 /**
- * Configuration for a scope: its initial state, its [Reducer], and any [InjectionKey]
- * overrides for that scope.
+ * Configuration for a scope: its initial state, its [Reducer], any [InjectionKey] overrides for
+ * that scope, and any [SubScope]s it composes with (Tutorial 05) — child scopes it creates,
+ * mirrors, and tears down as fields of its own [State] go non-null/null.
  */
 data class ScopeConfig<State, When>(
     val initial: State,
     val update: Reducer<State, When>,
-    val provide: List<Pair<InjectionKey<*>, Any?>> = emptyList()
+    val provide: List<Pair<InjectionKey<*>, Any?>> = emptyList(),
+    val subScopes: List<SubScope<State, When, *, *>> = emptyList()
 )

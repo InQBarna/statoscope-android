@@ -3,6 +3,7 @@ import statoscope.core.Dependencies
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** A remote counter's payload — what actually gets persisted, over the network, on each change. */
 data class Dto(val count: Int)
 
@@ -21,12 +22,14 @@ sealed interface CloudCounterWhen {
 /**
  * Posts the counter's new value to a remote API. Simulated with `delay(...)` rather than a
  * real network call — safe and deterministic to have running in the background, unlike an
- * unmocked call to a real host.
+ * unmocked call to a real host. Returns `Dto` — its own natural result — not `CloudCounterWhen`;
+ * nothing here knows this effect is even being used by a counter. See `.map(...)` below, where
+ * `cloudCounterUpdate` adapts that `Dto` into its own `NetworkPostCompleted` event.
  */
-class NetworkPostEffect(private val newValue: Int) : Effect<CloudCounterWhen> {
-    override suspend fun run(): CloudCounterWhen {
+class NetworkPostEffect(private val newValue: Int) : Effect<Dto> {
+    override suspend fun run(): Dto {
         delay(10) // Simulate a network round-trip
-        return CloudCounterWhen.NetworkPostCompleted(Dto(count = newValue))
+        return Dto(count = newValue)
     }
 }
 
@@ -39,14 +42,14 @@ fun cloudCounterUpdate(
     return when (action) {
         is CloudCounterWhen.UserTappedIncrementButton -> {
             val newValue = state.viewDisplaysTotalCount + 1
-            effects.enqueue(NetworkPostEffect(newValue))
+            effects.enqueue(NetworkPostEffect(newValue).map(CloudCounterWhen::NetworkPostCompleted))
             state.copy(viewDisplaysTotalCount = newValue, viewShowsLoadingAndDisablesButtons = true)
         }
 
         is CloudCounterWhen.UserTappedDecrementButton -> {
             if (state.viewDisplaysTotalCount <= 0) return state
             val newValue = state.viewDisplaysTotalCount - 1
-            effects.enqueue(NetworkPostEffect(newValue))
+            effects.enqueue(NetworkPostEffect(newValue).map(CloudCounterWhen::NetworkPostCompleted))
             state.copy(viewDisplaysTotalCount = newValue, viewShowsLoadingAndDisablesButtons = true)
         }
 

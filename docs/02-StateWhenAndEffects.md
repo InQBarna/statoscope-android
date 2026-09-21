@@ -33,12 +33,14 @@ import statoscope.core.Dependencies
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 ```
 
-`Effect<When>` is the interface an effect implements — a single `suspend fun run(): When`.
-`EffectsState<When>` is the handle `update` enqueues one through. `Dependencies` isn't used
-until Tutorial 04 — imported here for the same reason `EffectsState` was in Tutorial 01: the
-import block is the union of everything the finished example needs.
+`Effect<T>` is the interface an effect implements — a single `suspend fun run(): T`. `T` is
+whatever the effect itself genuinely produces, not necessarily a `When` case; `map` (Step 4) is
+what adapts one to the other. `EffectsState<When>` is the handle `update` enqueues one through.
+`Dependencies` isn't used until Tutorial 04 — imported here for the same reason `EffectsState`
+was in Tutorial 01: the import block is the union of everything the finished example needs.
 
 ### Step 2 — declare the state and the payload
 
@@ -52,6 +54,7 @@ import statoscope.core.Dependencies
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** A remote counter's payload — what actually gets persisted, over the network, on each change. */
 data class Dto(val count: Int)
 
@@ -74,6 +77,7 @@ import statoscope.core.Dependencies
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** A remote counter's payload — what actually gets persisted, over the network, on each change. */
 data class Dto(val count: Int)
 
@@ -90,15 +94,18 @@ sealed interface CloudCounterWhen {
 }
 ```
 
-### Step 4 — the effect and the full implementation
+### Step 4 — the effect, `.map()`, and the full implementation
 
-`NetworkPostEffect` implements `Effect<CloudCounterWhen>` — its `run()` is a `suspend fun`, so
-it can `delay(...)` (standing in for a real network round-trip here) without blocking anything,
-and it returns the `When` that reports its result. `update` enqueues one via
-`effects.enqueue(...)` instead of a bare self-call, since it's a plain function with no `self`
-to call it on — otherwise the shape is identical to Tutorial 01: mutate state synchronously,
-enqueue the async work, and let its completion arrive as another event through the same
-function.
+`NetworkPostEffect` implements `Effect<Dto>` — its own natural result, not `CloudCounterWhen`.
+Nothing inside `NetworkPostEffect` knows it's being used by a counter at all; `run()` is a
+`suspend fun`, so it can `delay(...)` (standing in for a real network round-trip here) without
+blocking anything, and it returns the `Dto` the (simulated) server responded with. The adaptation
+from that `Dto` to `CloudCounterWhen.NetworkPostCompleted` happens at the enqueue site instead,
+via `.map(...)` — `update` enqueues `NetworkPostEffect(newValue).map(CloudCounterWhen::NetworkPostCompleted)`
+rather than a bare self-call, since it's a plain function with no `self` to call it on. This
+split is what makes `NetworkPostEffect` a genuinely reusable unit: any reducer whose `When` can
+be constructed from a `Dto` could enqueue this exact same effect, unchanged — nothing about it is
+specific to `CloudCounterWhen`.
 
 > **Revised:** Tutorial 04 (Dependency Injection) needed every reducer to be able to resolve
 > injected dependencies, so `ScopeConfig`'s `update` field grew a fourth parameter,
@@ -106,6 +113,12 @@ function.
 > injected value — same growth pattern documented in Tutorial 01: add the parameter, retrofit
 > every existing example to accept (and ignore) it, document the change rather than silently
 > rewriting history.
+>
+> **Revised again:** `NetworkPostEffect` originally implemented `Effect<CloudCounterWhen>`
+> directly, returning `CloudCounterWhen.NetworkPostCompleted(...)` from `run()` itself — reusable
+> by nothing but this one reducer. `Effect<T>`/`.map(...)` (`statoscope.core`) were added once
+> Tutorial 04's own `NetworkFetchEffect` needed the same fix, ported from Swift Statoscope's
+> `Effect.ResultType`/`.map(_:)` — this tutorial and Tutorial 04 were both retrofitted together.
 
 ```kotlin
 import kotlinx.coroutines.delay
@@ -113,6 +126,7 @@ import statoscope.core.Dependencies
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 /** A remote counter's payload — what actually gets persisted, over the network, on each change. */
 data class Dto(val count: Int)
 
@@ -131,12 +145,14 @@ sealed interface CloudCounterWhen {
 /**
  * Posts the counter's new value to a remote API. Simulated with `delay(...)` rather than a
  * real network call — safe and deterministic to have running in the background, unlike an
- * unmocked call to a real host.
+ * unmocked call to a real host. Returns `Dto` — its own natural result — not `CloudCounterWhen`;
+ * nothing here knows this effect is even being used by a counter. See `.map(...)` below, where
+ * `cloudCounterUpdate` adapts that `Dto` into its own `NetworkPostCompleted` event.
  */
-class NetworkPostEffect(private val newValue: Int) : Effect<CloudCounterWhen> {
-    override suspend fun run(): CloudCounterWhen {
+class NetworkPostEffect(private val newValue: Int) : Effect<Dto> {
+    override suspend fun run(): Dto {
         delay(10) // Simulate a network round-trip
-        return CloudCounterWhen.NetworkPostCompleted(Dto(count = newValue))
+        return Dto(count = newValue)
     }
 }
 
@@ -149,14 +165,14 @@ fun cloudCounterUpdate(
     return when (action) {
         is CloudCounterWhen.UserTappedIncrementButton -> {
             val newValue = state.viewDisplaysTotalCount + 1
-            effects.enqueue(NetworkPostEffect(newValue))
+            effects.enqueue(NetworkPostEffect(newValue).map(CloudCounterWhen::NetworkPostCompleted))
             state.copy(viewDisplaysTotalCount = newValue, viewShowsLoadingAndDisablesButtons = true)
         }
 
         is CloudCounterWhen.UserTappedDecrementButton -> {
             if (state.viewDisplaysTotalCount <= 0) return state
             val newValue = state.viewDisplaysTotalCount - 1
-            effects.enqueue(NetworkPostEffect(newValue))
+            effects.enqueue(NetworkPostEffect(newValue).map(CloudCounterWhen::NetworkPostCompleted))
             state.copy(viewDisplaysTotalCount = newValue, viewShowsLoadingAndDisablesButtons = true)
         }
 
@@ -173,6 +189,12 @@ val cloudCounterConfig = ScopeConfig(
     update = ::cloudCounterUpdate
 )
 ```
+
+`map`'s own signature — `fun <T, When> Effect<T>.map(transform: (T) -> When): Effect<When>` —
+just wraps the original effect, calling `transform` on whatever it returns. Ports Swift
+Statoscope's `Effect.map(_:)` (`Sources/Statoscope/Effects/Effect.swift`) directly; the
+`ResultType`/`.map` split is Swift's design, not new here — this tutorial is where Kotlin catches
+up to it, rather than continuing to hard-bind every effect to one specific reducer's `When`.
 
 Nice — a reducer with effects, same shape as Tutorial 01, still no `self` anywhere.
 
