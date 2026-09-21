@@ -1,9 +1,10 @@
 package statoscope.core
 
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -100,10 +101,11 @@ val defaultEffectDispatcher: CoroutineDispatcher by lazy {
 /**
  * Creates a [ScopeStore] from a [ScopeConfig].
  *
- * [effectScope] is where enqueued effects are launched — fire-and-forget, no cancellation
- * support yet. Defaults to [defaultEffectDispatcher] so callers that never enqueue effects
- * (e.g. Tutorial 01's `counterConfig`) don't need to provide one, and callers that do get a
- * consistent delivery thread without asking for it.
+ * [effectScope] is where enqueued effects are launched. Defaults to [defaultEffectDispatcher] so
+ * callers that never enqueue effects (e.g. Tutorial 01's `counterConfig`) don't need to provide
+ * one, and callers that do get a consistent delivery thread without asking for it. Real
+ * cancellation: an [EffectsState.cancelEffect]/[EffectsState.cancelAllEffects] call from
+ * `update()` cancels the actual running `Job`, not just bookkeeping.
  */
 fun <State, When> createScope(
     config: ScopeConfig<State, When>,
@@ -167,13 +169,21 @@ private class ScopeStoreImpl<State, When>(
         superstateFallback = inheritedDependencies ?: NoAncestorDependencies
     )
     private val logPrefix: String = scopeLogPrefix(config.initial, this)
-    private val effectCounter = AtomicInteger(0)
+    private val effectIdCounter = AtomicLong(0)
 
     private val mutableStateFlow = MutableStateFlow(config.initial)
     override val stateFlow: StateFlow<State> = mutableStateFlow.asStateFlow()
     override val state: State get() = mutableStateFlow.value
 
     private var middleware: Middleware<State, When>? = null
+
+    private class RunningEffect(val pristine: Effect<*>, val job: Job)
+
+    // Positive ids only — MutableEffectsState reserves negative ones for effects enqueued but
+    // not yet actually launched within a single update() call (see its own doc). Mutated only
+    // from inside send()'s lock (process()/launchEffect() below) or, for the self-removal on
+    // completion, under an explicit synchronized(this) — see launchEffect.
+    private val runningEffects = LinkedHashMap<Long, RunningEffect>()
 
     // Keyed by the exact SubScope reference config.subScopes was declared with — its identity
     // is stable for the store's whole lifetime, so this is a legitimate map key without
@@ -220,7 +230,9 @@ private class ScopeStoreImpl<State, When>(
     // { ... } shape that error-handling middleware relies on — before send()'s own outer catch
     // (above) swallows anything a middleware didn't already handle itself.
     private fun process(action: When) {
-        val effects = MutableEffectsState<When>()
+        val effects = MutableEffectsState<When>(
+            ongoing = runningEffects.entries.map { (id, running) -> id to running.pristine }
+        )
         StatoscopeLogger.log(LogLevel.When, logPrefix) { describeObject(action) }
 
         val previousState = state
@@ -248,25 +260,30 @@ private class ScopeStoreImpl<State, When>(
             }
         }
 
-        effects.flush().forEach { effect -> launchEffect(effect) }
+        effects.flushCancelledExistingIds().forEach { id -> runningEffects.remove(id)?.job?.cancel() }
+        effects.flushNewlyEnqueued().forEach { effect -> launchEffect(effect) }
     }
 
     private fun launchEffect(effect: Effect<When>) {
         if (scopeEffectsDisabledInUnitTests) return
-        val id = effectCounter.incrementAndGet()
+        val id = effectIdCounter.incrementAndGet()
+        val pristineEffect = effect.pristine()
         StatoscopeLogger.log(LogLevel.Effects, logPrefix) { "🪃 ↗ [$id] ${describeObject(effect)}" }
-        effectScope.launch {
+        val job = effectScope.launch {
             val result = try {
                 effect.run()
             } catch (error: Throwable) {
                 StatoscopeLogger.log(LogLevel.Effects, logPrefix) {
                     "🪃 💥 [$id] Unhandled throw: ${describeObject(effect)}\nError: $error"
                 }
+                synchronized(this@ScopeStoreImpl) { runningEffects.remove(id) }
                 throw error
             }
             StatoscopeLogger.log(LogLevel.Effects, logPrefix) { "🪃 ↩ [$id] ${describeObject(effect)}" }
+            synchronized(this@ScopeStoreImpl) { runningEffects.remove(id) }
             send(result)
         }
+        runningEffects[id] = RunningEffect(pristineEffect, job)
     }
 
     // Runs after every state update, once per declared SubScope — a null→non-null transition on

@@ -107,9 +107,15 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
      */
     fun on(action: When): TestPlan<State, When> = apply {
         steps += {
+            // Always starts fresh, with no ongoing effects — TestPlan tests one update() call at
+            // a time, in isolation (see the class doc), so it doesn't track effects as genuinely
+            // "launched" the way a real ScopeStore does across calls; there's nothing there yet
+            // for a later step's own EffectsState.effects/cancelEffect to see or cancel. A
+            // reducer that queries/cancels its *own* already-ongoing effects (a real ScopeStore
+            // feature) needs a real Store to test, the same way scope composition does.
             val effects = MutableEffectsState<When>()
             state = config.update(state, action, effects, dependencies)
-            lastEnqueuedEffects = effects.flush()
+            lastEnqueuedEffects = effects.flushNewlyEnqueued()
         }
     }
 

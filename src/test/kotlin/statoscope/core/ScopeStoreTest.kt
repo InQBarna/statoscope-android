@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -43,6 +44,68 @@ private val testConfig = ScopeConfig<TestState, TestWhen>(
 private class FixedResultEffect(private val result: TestWhen) : Effect<TestWhen> {
     override suspend fun run(): TestWhen = result
 }
+
+private sealed interface CancelWhen {
+    data object Start : CancelWhen
+    data object CancelOngoing : CancelWhen
+    data class Completed(val value: String) : CancelWhen
+}
+
+/** Never completes within a test's virtual time unless something actually advances past its
+ *  delay — the point being that a *cancelled* SlowEffect must never get the chance to. */
+private class SlowEffect : Effect<CancelWhen> {
+    override suspend fun run(): CancelWhen {
+        delay(10_000)
+        return CancelWhen.Completed("should never arrive")
+    }
+}
+
+private val cancelConfig = ScopeConfig<TestState, CancelWhen>(
+    initial = TestState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is CancelWhen.Start -> {
+                effects.enqueue(SlowEffect())
+                state.copy(marker = "started")
+            }
+            is CancelWhen.CancelOngoing -> {
+                effects.cancelEffect { it is SlowEffect }
+                state.copy(marker = "cancelled")
+            }
+            is CancelWhen.Completed -> state.copy(marker = action.value)
+        }
+    }
+)
+
+private sealed interface QueryWhen {
+    data object StartIfNotAlreadyRunning : QueryWhen
+    data class Completed(val value: String) : QueryWhen
+}
+
+private class CountingSlowEffect : Effect<QueryWhen> {
+    override suspend fun run(): QueryWhen {
+        delay(10_000)
+        return QueryWhen.Completed("effect-completed")
+    }
+}
+
+/** Mirrors Swift's own documented `guard nil == effects.first(where: { $0 is NetworkEffect<DTO> })`
+ *  pattern — a reducer reading its own currently-ongoing effects to avoid double-triggering. */
+private val queryConfig = ScopeConfig<TestState, QueryWhen>(
+    initial = TestState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is QueryWhen.StartIfNotAlreadyRunning ->
+                if (effects.effects.none { it is CountingSlowEffect }) {
+                    effects.enqueue(CountingSlowEffect())
+                    state.copy(marker = "started")
+                } else {
+                    state.copy(marker = "already running, skipped")
+                }
+            is QueryWhen.Completed -> state.copy(marker = action.value)
+        }
+    }
+)
 
 /** Like [testConfig], but Increment also enqueues an effect completing with a marker only the
  *  effect's own completion could have produced — proof the effect actually ran, not just that
@@ -213,6 +276,38 @@ class ScopeStoreTest {
         assertTrue(
             oneThreadName?.startsWith("Statoscope-EffectDispatcher") == true,
             "expected the dedicated dispatcher's thread name, got: $oneThreadName"
+        )
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testCancelEffectActuallyCancelsTheRunningJob() = runTest {
+        val store = createScope(cancelConfig, effectScope = this)
+
+        store.send(CancelWhen.Start)
+        // SlowEffect is now launched, suspended in delay(10_000) — genuinely ongoing, not completed.
+        store.send(CancelWhen.CancelOngoing)
+
+        // If cancelEffect only removed bookkeeping without cancelling the real Job, advancing
+        // past the 10s delay here would let SlowEffect complete anyway and overwrite the marker.
+        advanceUntilIdle()
+
+        assertEquals("cancelled", store.state.marker, "a cancelled effect's completion must never arrive")
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testEffectsLetsAReducerAvoidDoubleTriggeringAnAlreadyOngoingEffect() = runTest {
+        val store = createScope(queryConfig, effectScope = this)
+
+        store.send(QueryWhen.StartIfNotAlreadyRunning)
+        assertEquals("started", store.state.marker)
+
+        // CountingSlowEffect is still suspended in its own delay(10_000) — genuinely ongoing.
+        store.send(QueryWhen.StartIfNotAlreadyRunning)
+        assertEquals(
+            "already running, skipped", store.state.marker,
+            "effects.effects should have shown the still-ongoing CountingSlowEffect to this second call"
         )
     }
 }

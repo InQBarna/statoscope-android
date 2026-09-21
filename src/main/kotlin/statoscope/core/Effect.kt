@@ -13,16 +13,32 @@ package statoscope.core
  * bypass the update contract.
  *
  * Ports Swift Statoscope's `Effect.ResultType` + `.map(_:)`
- * (`Sources/Statoscope/Effects/Effect.swift`) directly. Swift's `AnyEffect`'s closure-based
- * construction is ported too, as [effect] — but the type-erasure identity it also carries (so
- * `pristineEquals`/`pristineIs` can see through a `map()` back to an effect's original type) is
- * not: Kotlin's `TestPlan.thenEffects` already takes an arbitrary predicate over the whole
- * enqueued list rather than comparing against one expected value, so there's nothing here that
- * needs recovering a pre-`map()` identity to work.
+ * (`Sources/Statoscope/Effects/Effect.swift`) directly, [effect]'s closure-based construction
+ * included (Swift's `AnyEffect { ... }`).
  */
 interface Effect<T> {
     suspend fun run(): T
 }
+
+/**
+ * Exposes the effect [map] wrapped, so [pristine] can see through any number of chained `.map()`
+ * calls back to the original — what makes [EffectsState.effects]/[EffectsState.cancelEffect]
+ * still able to query/cancel by an effect's real, original type after it's been mapped for
+ * enqueueing. Internal: [pristine] is the public surface.
+ */
+internal interface PristineHolder {
+    val pristine: Effect<*>
+}
+
+/**
+ * The original effect, walking back through any number of chained [map] calls — `this` if it was
+ * never mapped at all. Ports Swift's `AnyEffect.pristine`; unlike Swift's `pristineEquals`/
+ * `pristineIs`, this returns the effect itself rather than a Bool, since Kotlin's own `is`/`as`
+ * already work naturally against it: `effect.pristine() is NetworkEffect`. An effect built with
+ * [effect] (a bare closure) has no meaningful type of its own beyond "some closure" — querying by
+ * type only ever finds a named `class ... : Effect<T>`, mapped or not.
+ */
+fun Effect<*>.pristine(): Effect<*> = (this as? PristineHolder)?.pristine ?: this
 
 /**
  * Adapts this effect's own result to [When] — the seam that lets an effect declared once (see
@@ -30,7 +46,8 @@ interface Effect<T> {
  */
 fun <T, When> Effect<T>.map(transform: (T) -> When): Effect<When> {
     val original = this
-    return object : Effect<When> {
+    return object : Effect<When>, PristineHolder {
+        override val pristine: Effect<*> = original.pristine()
         override suspend fun run(): When = transform(original.run())
     }
 }
