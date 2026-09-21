@@ -12,10 +12,10 @@ package statoscope.examples.tutorial04
 // @extract:begin Injection-Reducer-01
 import kotlinx.coroutines.delay
 import statoscope.core.Dependencies
-import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
+import statoscope.core.effect
 import statoscope.core.map
 // @extract:end Injection-DateProvider-01
 // @extract:end Injection-PersistenceProvider-01
@@ -61,8 +61,8 @@ data class ArticleDto(val id: String, val title: String, val content: String)
 
 /**
  * Fetches the article list. The default simulates a network round-trip with `delay(...)`
- * rather than calling a real host — same reasoning as Tutorial 02's `NetworkPostEffect`: safe
- * to have genuinely running in the background, unlike an unmocked call to a real host.
+ * rather than calling a real host — same reasoning as Tutorial 02's `postToNetwork`: safe to
+ * have genuinely running in the background, unlike an unmocked call to a real host.
  */
 class NetworkProvider(val fetchArticles: suspend () -> List<ArticleDto>)
 
@@ -91,14 +91,6 @@ sealed interface NewsFeedListWhen {
     data class UserTappedFavoriteButton(val id: String) : NewsFeedListWhen
 }
 
-/**
- * Returns its own natural result, `List<ArticleDto>` — not `NewsFeedListWhen` — same reasoning
- * as Tutorial 02's `NetworkPostEffect`: `update` adapts it with `.map(...)` below.
- */
-class NetworkFetchEffect(private val network: NetworkProvider) : Effect<List<ArticleDto>> {
-    override suspend fun run(): List<ArticleDto> = network.fetchArticles()
-}
-
 fun newsFeedListUpdate(
     state: NewsFeedListState,
     action: NewsFeedListWhen,
@@ -110,7 +102,7 @@ fun newsFeedListUpdate(
             val persistence = dependencies.resolve(PersistenceProviderKey)
             val network = dependencies.resolve(NetworkProviderKey)
 
-            effects.enqueue(NetworkFetchEffect(network).map(NewsFeedListWhen::NetworkFetchCompleted))
+            effects.enqueue(effect { network.fetchArticles() }.map(NewsFeedListWhen::NetworkFetchCompleted))
 
             state.copy(
                 loading = true,
