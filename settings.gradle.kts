@@ -11,6 +11,11 @@ pluginManagement {
     plugins {
         id("org.jetbrains.kotlin.jvm") version "2.3.20"
         id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+        // KSP's own versioning dropped the "<kotlin>-<ksp>" combined scheme somewhere around
+        // Kotlin 2.3 — plain releases now, not required to match the Kotlin version exactly.
+        // Verified compatible with 2.3.20 above by actually building and running against it
+        // (see :codegen-processor's self-test) before pinning this.
+        id("com.google.devtools.ksp") version "2.3.12"
     }
 }
 
@@ -32,6 +37,20 @@ include(":testing")
 // nothing from the Android Gradle Plugin — it's still plain kotlin("jvm"), no AGP applied, so
 // none of examples/android's AGP/macro-plugin tooling issues apply here.
 include(":android")
+// The @Reducer-driven config generator: @Reducer/@SubState/@OnChildAction annotations (:codegen)
+// plus the KSP SymbolProcessor that reads them and generates <Reducer>.config — the
+// ScopeConfig(...)/SubScope(...)/get/set boilerplate a hand-written Tutorial 05-style reducer
+// tree otherwise needs. Two modules, matching KSP's own annotations/processor split (and Room's,
+// Moshi's, etc.): :codegen has zero dependencies (pure marker annotations, usable without KSP at
+// all); :codegen-processor is only ever needed on a module's `ksp` configuration, never
+// `implementation`. Neither depends on the root project — the processor validates/emits against
+// fully-qualified name strings, never actual Kotlin types from here, so applying KSP downstream
+// (an app module, statoscope-kotlin-examples) needs no build-time link back to this repo beyond
+// the ordinary "statoscope:statoscope-kotlin:0.1.0" dependency the generated code itself expects
+// at compile time. Neither is applied to any module in this build — like :testing/:android, this
+// is a library capability for consumers to opt into, not something the tutorials themselves use.
+include(":codegen")
+include(":codegen-processor")
 // examples/todolist/android needed AGP + a Kotlin version old enough to pair with it, which
 // dragged this whole build down to Gradle 8.13 and caused real, repeated tooling breakage when
 // nested here (see ../statoscope-kotlin-examples/MIGRATION_NOTES.md for the full story). Moved
