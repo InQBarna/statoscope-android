@@ -13,6 +13,7 @@ import kotlin.test.assertTrue
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.map
 
 private data class CounterState(val count: Int = 0)
 
@@ -36,6 +37,33 @@ private val config = ScopeConfig<CounterState, CounterWhen>(
             }
             is CounterWhen.IncrementWithoutEffect -> state.copy(count = state.count + 1)
             is CounterWhen.EffectFired -> state
+        }
+    }
+)
+
+// A real .map()-using fixture — NoOpEffect above returns CounterWhen directly, so it can't
+// exercise onEffectCompletes() (there's no mapping chain to replay). run() deliberately errors:
+// onEffectCompletes() must never call it for real.
+private data class NetworkState(val loading: Boolean = false, val value: Int = 0)
+
+private sealed interface NetworkWhen {
+    data object Load : NetworkWhen
+    data class Loaded(val value: Int) : NetworkWhen
+}
+
+private class RawNetworkFetch : Effect<Int> {
+    override suspend fun run(): Int = error("must never actually run — completion is simulated")
+}
+
+private val networkConfig = ScopeConfig<NetworkState, NetworkWhen>(
+    initial = NetworkState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is NetworkWhen.Load -> {
+                effects.enqueue(RawNetworkFetch().map(NetworkWhen::Loaded))
+                state.copy(loading = true)
+            }
+            is NetworkWhen.Loaded -> state.copy(loading = false, value = action.value)
         }
     }
 )
@@ -92,5 +120,21 @@ class TestPlanTest {
             .on(CounterWhen.IncrementWithEffect)
             .thenEquals(CounterState::count, 1)
             .runTest()
+    }
+
+    @Test
+    fun testOnEffectCompletesReplaysTheRealMapFromARawPristineValue() {
+        given(networkConfig)
+            .on(NetworkWhen.Load)
+            .onEffectCompletes(RawNetworkFetch::class, 42)
+            .thenEquals(NetworkState::value, 42)
+            .thenEquals(NetworkState::loading, false)
+            .runTest()
+    }
+
+    @Test
+    fun testOnEffectCompletesFailsClearlyWhenNoMatchingEffectIsPending() {
+        val plan = given(networkConfig).onEffectCompletes(RawNetworkFetch::class, 42)
+        assertFailsWith<IllegalStateException> { plan.runTest() }
     }
 }

@@ -45,6 +45,41 @@ private class FixedResultEffect(private val result: TestWhen) : Effect<TestWhen>
     override suspend fun run(): TestWhen = result
 }
 
+// Two differently-typed raw effects, both real .map()-ped — for proving completeEffect() finds
+// the one matching the REQUESTED type among several simultaneously pending, and really replays
+// its own map (not just accepts whatever value it's handed).
+private class RawIntFetch(private val value: Int) : Effect<Int> {
+    override suspend fun run(): Int = value
+}
+
+private class RawStringFetch(private val value: String) : Effect<String> {
+    override suspend fun run(): String = value
+}
+
+private sealed interface MultiEffectWhen {
+    data object StartBoth : MultiEffectWhen
+    data class IntLoaded(val value: Int) : MultiEffectWhen
+    data class StringLoaded(val value: String) : MultiEffectWhen
+}
+
+private val multiEffectConfig = ScopeConfig<TestState, MultiEffectWhen>(
+    initial = TestState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is MultiEffectWhen.StartBoth -> {
+                // Enqueued oldest-first: RawIntFetch, then RawStringFetch — deliberately, so a
+                // completeEffect() that ignored the requested type and just grabbed the oldest
+                // would find the wrong one here.
+                effects.enqueue(RawIntFetch(0).map(MultiEffectWhen::IntLoaded))
+                effects.enqueue(RawStringFetch("").map(MultiEffectWhen::StringLoaded))
+                state
+            }
+            is MultiEffectWhen.IntLoaded -> state.copy(count = action.value)
+            is MultiEffectWhen.StringLoaded -> state.copy(marker = action.value)
+        }
+    }
+)
+
 private sealed interface CancelWhen {
     data object Start : CancelWhen
     data object CancelOngoing : CancelWhen
@@ -319,6 +354,29 @@ class ScopeStoreTest {
         advanceUntilIdle()
 
         assertEquals("cancelled", store.state.marker, "a cancelled effect's completion must never arrive")
+    }
+
+    @OptIn(StatoscopeInternalApi::class)
+    @Test
+    fun testCompleteEffectFindsTheRequestedTypeAmongMultiplePendingAndReplaysItsRealMap() {
+        val store = createScope(multiEffectConfig)
+        store.send(MultiEffectWhen.StartBoth)
+        // Both RawIntFetch and RawStringFetch are pending, oldest (Int) first — completeEffect
+        // must find RawStringFetch specifically, not whichever happens to be oldest.
+        assertTrue(store.completeEffect(RawStringFetch::class, "real-string"))
+
+        assertEquals("real-string", store.state.marker, "the real .map() must have run, not a guessed value")
+        assertEquals(0, store.state.count, "the still-pending RawIntFetch must be untouched")
+
+        assertTrue(store.completeEffect(RawIntFetch::class, 7))
+        assertEquals(7, store.state.count)
+    }
+
+    @OptIn(StatoscopeInternalApi::class)
+    @Test
+    fun testCompleteEffectReturnsFalseWhenNoPendingEffectMatchesTheType() {
+        val store = createScope(multiEffectConfig)
+        assertTrue(!store.completeEffect(RawStringFetch::class, "unused"))
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

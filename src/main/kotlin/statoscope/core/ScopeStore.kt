@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.reflect.KClass
 
 /**
  * When `true`, enqueued effects are recorded but never actually launched — ports Swift
@@ -100,6 +101,16 @@ interface ScopeStore<State, When> {
      */
     @StatoscopeInternalApi
     fun completeOldestEffect(result: When): Boolean
+
+    /**
+     * Completes the first tracked effect (see [pendingEffects]) whose pristine type is
+     * [effectType] with [pristineResult] — a value shaped like *that effect's own* natural
+     * result, replayed through its real `.map()` chain via [completePristine], never a
+     * tester-guessed final [When] value. Mirrors Swift's `WHEN_EffectCompletes<EffectType>`.
+     * Returns `false`, sending nothing, when no pending effect matches.
+     */
+    @StatoscopeInternalApi
+    fun completeEffect(effectType: KClass<out Effect<*>>, pristineResult: Any?): Boolean
 }
 
 /**
@@ -198,8 +209,10 @@ private class ScopeStoreImpl<State, When>(
     private var middleware: Middleware<State, When>? = null
 
     // job is null exactly when scopeEffectsDisabledInUnitTests held this effect back from ever
-    // actually launching (see launchEffect) — bookkeeping-only, nothing to cancel.
-    private class RunningEffect(val pristine: Effect<*>, val job: Job?)
+    // actually launching (see launchEffect) — bookkeeping-only, nothing to cancel. enqueued is
+    // the actual object passed to enqueue() (possibly .map()-wrapped, with its transform chain
+    // intact) — needed by completeEffect(); pristine is its walked-back type, used to look it up.
+    private class RunningEffect(val enqueued: Effect<*>, val pristine: Effect<*>, val job: Job?)
 
     // Positive ids only — MutableEffectsState reserves negative ones for effects enqueued but
     // not yet actually launched within a single update() call (see its own doc). Mutated only
@@ -236,6 +249,16 @@ private class ScopeStoreImpl<State, When>(
         runningEffects.remove(oldest.key)
         oldest.value.job?.cancel()
         send(result)
+        return true
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Synchronized
+    override fun completeEffect(effectType: KClass<out Effect<*>>, pristineResult: Any?): Boolean {
+        val found = runningEffects.entries.firstOrNull { effectType.isInstance(it.value.pristine) } ?: return false
+        runningEffects.remove(found.key)
+        found.value.job?.cancel()
+        send(found.value.enqueued.completePristine(pristineResult) as When)
         return true
     }
 
@@ -309,7 +332,7 @@ private class ScopeStoreImpl<State, When>(
         // never actually launched under the default JUnit-detected setting. Only the real
         // effectScope.launch below is skipped.
         if (scopeEffectsDisabledInUnitTests) {
-            runningEffects[id] = RunningEffect(pristineEffect, job = null)
+            runningEffects[id] = RunningEffect(enqueued = effect, pristine = pristineEffect, job = null)
             return
         }
 
@@ -327,7 +350,7 @@ private class ScopeStoreImpl<State, When>(
             synchronized(this@ScopeStoreImpl) { runningEffects.remove(id) }
             send(result)
         }
-        runningEffects[id] = RunningEffect(pristineEffect, job)
+        runningEffects[id] = RunningEffect(enqueued = effect, pristine = pristineEffect, job = job)
     }
 
     // Runs after every state update, once per declared SubScope — a null→non-null transition on

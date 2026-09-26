@@ -1,5 +1,6 @@
 package statoscope.testing
 
+import kotlin.reflect.KClass
 import kotlin.reflect.KProperty1
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -11,6 +12,8 @@ import statoscope.core.MutableEffectsState
 import statoscope.core.ScopeConfig
 import statoscope.core.StatoscopeInternalApi
 import statoscope.core.SuperstateKey
+import statoscope.core.completePristine
+import statoscope.core.pristine
 
 /**
  * Fluent GIVEN/WHEN/THEN builder for testing a scope's behavior.
@@ -106,16 +109,39 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
      * same effects-never-execute rule as everywhere else in this file.
      */
     fun on(action: When): TestPlan<State, When> = apply {
+        steps += { dispatch(action) }
+    }
+
+    // Always starts fresh, with no ongoing effects — TestPlan tests one update() call at a time,
+    // in isolation (see the class doc), so it doesn't track effects as genuinely "launched" the
+    // way a real ScopeStore does across calls; there's nothing there yet for a later step's own
+    // EffectsState.effects/cancelEffect to see or cancel. A reducer that queries/cancels its
+    // *own* already-ongoing effects (a real ScopeStore feature) needs a real Store to test, the
+    // same way scope composition does. Shared by on() and onEffectCompletes() so both dispatch
+    // through the exact same path.
+    private fun dispatch(action: When) {
+        val effects = MutableEffectsState<When>()
+        state = config.update(state, action, effects, dependencies)
+        lastEnqueuedEffects = effects.flushNewlyEnqueued()
+    }
+
+    /**
+     * Completes the effect of type [effectType] most recently enqueued (see [thenEffects]) with
+     * [pristineResult] — a value shaped like *that effect's own* natural result, replayed through
+     * its real `.map()` chain — rather than a tester-guessed final [When] value the way plain
+     * [on] requires when simulating a completion by hand. Proves the effect's own mapping wiring
+     * is correct, not just an assumption about what it produces. Mirrors Swift's
+     * `WHEN_EffectCompletes`.
+     */
+    @OptIn(StatoscopeInternalApi::class)
+    fun <EffectType : Effect<R>, R> onEffectCompletes(
+        effectType: KClass<EffectType>,
+        pristineResult: R
+    ): TestPlan<State, When> = apply {
         steps += {
-            // Always starts fresh, with no ongoing effects — TestPlan tests one update() call at
-            // a time, in isolation (see the class doc), so it doesn't track effects as genuinely
-            // "launched" the way a real ScopeStore does across calls; there's nothing there yet
-            // for a later step's own EffectsState.effects/cancelEffect to see or cancel. A
-            // reducer that queries/cancels its *own* already-ongoing effects (a real ScopeStore
-            // feature) needs a real Store to test, the same way scope composition does.
-            val effects = MutableEffectsState<When>()
-            state = config.update(state, action, effects, dependencies)
-            lastEnqueuedEffects = effects.flushNewlyEnqueued()
+            val found = lastEnqueuedEffects.firstOrNull { effectType.isInstance(it.pristine()) }
+                ?: error("onEffectCompletes(${effectType.simpleName}): no matching enqueued effect")
+            dispatch(found.completePristine(pristineResult))
         }
     }
 

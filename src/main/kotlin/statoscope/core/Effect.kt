@@ -28,6 +28,15 @@ interface Effect<T> {
  */
 internal interface PristineHolder {
     val pristine: Effect<*>
+
+    /**
+     * Replays every chained [map] transform starting from [rawResult] — a value shaped like the
+     * PRISTINE effect's own natural result, not this (possibly mapped) effect's. Lets a test
+     * simulate a specific effect completing with its own real result and get back what [run]
+     * would actually have produced, without ever calling [run]. Mirrors Swift's
+     * `AnyEffect.transformPristineResult`.
+     */
+    fun applyFromPristine(rawResult: Any?): Any?
 }
 
 /**
@@ -49,8 +58,25 @@ fun <T, When> Effect<T>.map(transform: (T) -> When): Effect<When> {
     return object : Effect<When>, PristineHolder {
         override val pristine: Effect<*> = original.pristine()
         override suspend fun run(): When = transform(original.run())
+
+        @Suppress("UNCHECKED_CAST")
+        override fun applyFromPristine(rawResult: Any?): When {
+            val throughOriginal = (original as? PristineHolder)?.applyFromPristine(rawResult) ?: rawResult
+            return transform(throughOriginal as T)
+        }
     }
 }
+
+/**
+ * Simulates this effect completing with [pristineResult] — a value shaped like the PRISTINE
+ * (never-mapped) effect's own natural result, see [pristine] — by replaying every [map] call
+ * chained onto it, never actually calling [Effect.run]. Ports Swift's `_pristineCompletes`. For
+ * an effect that was never mapped, [pristineResult] already IS the final result.
+ */
+@Suppress("UNCHECKED_CAST")
+@StatoscopeInternalApi
+fun <T> Effect<T>.completePristine(pristineResult: Any?): T =
+    (this as? PristineHolder)?.applyFromPristine(pristineResult) as? T ?: pristineResult as T
 
 /**
  * Builds an [Effect] straight from a suspend function — for the common case where whatever it's

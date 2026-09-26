@@ -20,6 +20,7 @@ import statoscope.core.Effect
 import statoscope.core.InjectionKey
 import statoscope.core.ScopeConfig
 import statoscope.core.SubScope
+import statoscope.core.map
 
 // --- Root -> List -> Article, three real levels ---
 
@@ -117,6 +118,33 @@ private val greeterConfig = ScopeConfig<GreeterState, GreeterWhen>(
     }
 )
 
+// --- A separate fixture just for completeEffect() — FixedDetailEffect above returns ArticleWhen
+// directly (no .map()), so it can't demonstrate replaying a real mapping chain. ---
+
+private data class NetworkArticleState(val loading: Boolean = false, val title: String? = null)
+
+private sealed interface NetworkArticleWhen {
+    data object Load : NetworkArticleWhen
+    data class TitleLoaded(val title: String) : NetworkArticleWhen
+}
+
+private class RawTitleFetch : Effect<String> {
+    override suspend fun run(): String = error("must never actually run — completion is simulated")
+}
+
+private val networkArticleConfig = ScopeConfig<NetworkArticleState, NetworkArticleWhen>(
+    initial = NetworkArticleState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is NetworkArticleWhen.Load -> {
+                effects.enqueue(RawTitleFetch().map(NetworkArticleWhen::TitleLoaded))
+                state.copy(loading = true)
+            }
+            is NetworkArticleWhen.TitleLoaded -> state.copy(loading = false, title = action.title)
+        }
+    }
+)
+
 class StoreTestPlanCompositionTest {
 
     @Test
@@ -156,6 +184,25 @@ class StoreTestPlanCompositionTest {
             .on(GreeterWhen.Greet)
             .thenEquals(GreeterState::greeted, "Hello")
             .runTest()
+    }
+
+    @Test
+    fun testCompleteEffectReplaysTheRealMapFromARawPristineValue() {
+        givenStore(networkArticleConfig)
+            .on(NetworkArticleWhen.Load)
+            .completeEffect(RawTitleFetch::class, "Kotlin Coroutines 101")
+            .thenEquals(NetworkArticleState::title, "Kotlin Coroutines 101")
+            .thenEquals(NetworkArticleState::loading, false)
+            .runTest()
+    }
+
+    @Test
+    fun testCompleteEffectFailsClearlyWhenNoMatchingEffectIsPending() {
+        val plan = givenStore(networkArticleConfig)
+            .completeEffect(RawTitleFetch::class, "unused")
+
+        val error = assertFailsWith<IllegalStateException> { plan.runTest() }
+        assertTrue(error.message!!.contains("no pending effect"))
     }
 
     @Test

@@ -1,5 +1,6 @@
 package statoscope.testing
 
+import kotlin.reflect.KClass
 import kotlin.reflect.KProperty1
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -103,6 +104,22 @@ abstract class StoreTestPlan<State, When, Self : StoreTestPlan<State, When, Self
         addStep { store ->
             check(store.completeOldestEffect(result)) {
                 "onOldestEffectCompletes: no pending effect to complete with $result"
+            }
+        }
+        return self()
+    }
+
+    /**
+     * Completes the pending effect of type [effectType] with [pristineResult] — a value shaped
+     * like *that effect's own* natural result, replayed through its real `.map()` chain (see
+     * [ScopeStore.completeEffect]) — rather than a tester-guessed final [When] value the way
+     * [onOldestEffectCompletes] requires. Proves the effect's own mapping wiring is correct, not
+     * just an assumption about what it produces. Mirrors Swift's `WHEN_EffectCompletes`.
+     */
+    fun <EffectType : Effect<R>, R> completeEffect(effectType: KClass<EffectType>, pristineResult: R): Self {
+        addStep { store ->
+            check(store.completeEffect(effectType, pristineResult)) {
+                "completeEffect(${effectType.simpleName}): no pending effect of that type"
             }
         }
         return self()

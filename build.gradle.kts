@@ -106,7 +106,8 @@ val extractDocSnippets by tasks.registering {
         "src/test/kotlin/statoscope/examples/tutorial02/CloudCounterExample.kt",
         "src/test/kotlin/statoscope/examples/tutorial03/MiddlewareExample.kt",
         "src/test/kotlin/statoscope/examples/tutorial04/InjectionExample.kt",
-        "src/test/kotlin/statoscope/examples/tutorial05/ScopesExample.kt"
+        "src/test/kotlin/statoscope/examples/tutorial05/ScopesExample.kt",
+        "src/test/kotlin/statoscope/examples/advanced/testing/AdvancedTestingExample.kt"
     )
     val outputDir = layout.projectDirectory.dir("docs/_generated")
 
