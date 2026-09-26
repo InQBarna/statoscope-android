@@ -80,6 +80,26 @@ interface ScopeStore<State, When> {
     fun <ChildState, ChildWhen> childStore(
         subScope: SubScope<State, When, ChildState, ChildWhen>
     ): ScopeStore<ChildState, ChildWhen>?
+
+    /**
+     * Effects currently tracked as ongoing — launched for real, or held back only as bookkeeping
+     * because [scopeEffectsDisabledInUnitTests] is set (see [launchEffect]) — oldest first, as
+     * their [Effect.pristine] type. Exists so [statoscope.testing.StoreTestPlan] can assert on a
+     * *real* composed store's pending effects the same way [statoscope.testing.TestPlan] already
+     * does for a single reducer's [EffectsState.effects].
+     */
+    @StatoscopeInternalApi
+    fun pendingEffects(): List<Effect<*>>
+
+    /**
+     * Completes the oldest tracked effect (see [pendingEffects]) with [result] — cancelling its
+     * real running `Job` first if one was actually launched, then calling [send] directly, never
+     * running the effect's own [Effect.run] for real. Mirrors Swift's
+     * `effectsState._cancelOlderEffect()` + `_unsafeSendImplementation(effectResult)`
+     * (`WHEN_OlderEffectCompletes`). Returns `false`, sending nothing, when nothing is pending.
+     */
+    @StatoscopeInternalApi
+    fun completeOldestEffect(result: When): Boolean
 }
 
 /**
@@ -177,7 +197,9 @@ private class ScopeStoreImpl<State, When>(
 
     private var middleware: Middleware<State, When>? = null
 
-    private class RunningEffect(val pristine: Effect<*>, val job: Job)
+    // job is null exactly when scopeEffectsDisabledInUnitTests held this effect back from ever
+    // actually launching (see launchEffect) — bookkeeping-only, nothing to cancel.
+    private class RunningEffect(val pristine: Effect<*>, val job: Job?)
 
     // Positive ids only — MutableEffectsState reserves negative ones for effects enqueued but
     // not yet actually launched within a single update() call (see its own doc). Mutated only
@@ -203,6 +225,19 @@ private class ScopeStoreImpl<State, When>(
         subScope: SubScope<State, When, ChildState, ChildWhen>
     ): ScopeStore<ChildState, ChildWhen>? =
         activeChildren[subScope] as? ScopeStore<ChildState, ChildWhen>
+
+    @Synchronized
+    override fun pendingEffects(): List<Effect<*>> =
+        runningEffects.values.map { it.pristine }
+
+    @Synchronized
+    override fun completeOldestEffect(result: When): Boolean {
+        val oldest = runningEffects.entries.firstOrNull() ?: return false
+        runningEffects.remove(oldest.key)
+        oldest.value.job?.cancel()
+        send(result)
+        return true
+    }
 
     // Effects complete on effectScope's own thread (defaultEffectDispatcher's dedicated thread
     // by default), not necessarily the thread that called the original send() — synchronized so
@@ -265,10 +300,19 @@ private class ScopeStoreImpl<State, When>(
     }
 
     private fun launchEffect(effect: Effect<When>) {
-        if (scopeEffectsDisabledInUnitTests) return
         val id = effectIdCounter.incrementAndGet()
         val pristineEffect = effect.pristine()
         StatoscopeLogger.log(LogLevel.Effects, logPrefix) { "🪃 ↗ [$id] ${describeObject(effect)}" }
+
+        // Bookkeeping is recorded regardless of scopeEffectsDisabledInUnitTests — a test needs to
+        // see this effect as pending (pendingEffects()/completeOldestEffect()) even though it's
+        // never actually launched under the default JUnit-detected setting. Only the real
+        // effectScope.launch below is skipped.
+        if (scopeEffectsDisabledInUnitTests) {
+            runningEffects[id] = RunningEffect(pristineEffect, job = null)
+            return
+        }
+
         val job = effectScope.launch {
             val result = try {
                 effect.run()
@@ -345,6 +389,19 @@ private class ScopeStoreImpl<State, When>(
     }
 
     private fun <ChildState, ChildWhen> deactivateChild(subScope: SubScope<State, When, ChildState, ChildWhen>) {
-        activeChildren.remove(subScope)
+        val removed = activeChildren.remove(subScope)
+        (removed as? ScopeStoreImpl<*, *>)?.cancelAllRunningEffectsRecursively()
+    }
+
+    // Called on a child store right as it's torn down (see deactivateChild) — without this, a
+    // deactivated child's own in-flight effect Jobs keep running (real IO, wasted work) and, on
+    // completion, call send() on a store nobody observes anymore. Recurses into the child's own
+    // activeChildren first, so a grandchild's effects are cancelled too, before clearing this
+    // level's own runningEffects.
+    @Synchronized
+    private fun cancelAllRunningEffectsRecursively() {
+        activeChildren.values.forEach { (it as? ScopeStoreImpl<*, *>)?.cancelAllRunningEffectsRecursively() }
+        runningEffects.values.forEach { it.job?.cancel() }
+        runningEffects.clear()
     }
 }

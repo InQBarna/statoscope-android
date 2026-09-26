@@ -54,7 +54,11 @@ internal class PendingTestPlan {
         val infrastructureClassNames = setOf(
             PendingTestPlan::class.java.name,
             TestPlan::class.java.name,
-            "statoscope.testing.TestPlanKt" // the file housing the top-level given() function
+            "statoscope.testing.TestPlanKt", // the file housing the top-level given() function
+            StoreTestPlan::class.java.name,
+            RootStoreTestPlan::class.java.name,
+            WithStoreTestPlan::class.java.name,
+            "statoscope.testing.StoreTestPlanKt" // the file housing the top-level givenStore() function
         )
     }
 }

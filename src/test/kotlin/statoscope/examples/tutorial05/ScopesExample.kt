@@ -309,7 +309,11 @@ class NewsFeedTest {
  * runs `update` directly, so it has no composed tree to navigate, only ever the one scope it was
  * given (see [statoscope.testing.TestPlan.withSuperstate]'s own doc). Proving the *composition*
  * actually works — that tapping favorite on a real, nested article scope really does reach the
- * list two levels up — needs a real [statoscope.core.ScopeStore], built with [createScope].
+ * list two levels up — needs a real [statoscope.core.ScopeStore], built with [createScope],
+ * exactly what's done here by hand. [statoscope.testing.givenStore] (`StoreTestPlan.kt`) now
+ * wraps this same shape in a fluent `with()`/`pop()` builder — prefer it for new composed-tree
+ * tests; this one stays as Tutorial 05's own worked example of the lower-level primitives it's
+ * built from.
  */
 class ScopesIntegrationTest {
 

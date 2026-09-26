@@ -77,6 +77,32 @@ private val cancelConfig = ScopeConfig<TestState, CancelWhen>(
     }
 )
 
+/** A parent that composes [cancelConfig] as a child — reused as-is, [SlowEffect] included, so
+ *  deactivating the child can be proven to cancel its own still-running effect Job. */
+private data class ParentWithChildState(val child: TestState? = null)
+
+private sealed interface ParentWithChildWhen {
+    data object ActivateChild : ParentWithChildWhen
+    data object DeactivateChild : ParentWithChildWhen
+}
+
+private val childSubScope = SubScope<ParentWithChildState, ParentWithChildWhen, TestState, CancelWhen>(
+    config = cancelConfig,
+    get = { it.child },
+    set = { state, child -> state.copy(child = child) }
+)
+
+private val parentWithChildConfig = ScopeConfig<ParentWithChildState, ParentWithChildWhen>(
+    initial = ParentWithChildState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is ParentWithChildWhen.ActivateChild -> state.copy(child = TestState())
+            is ParentWithChildWhen.DeactivateChild -> state.copy(child = null)
+        }
+    },
+    subScopes = listOf(childSubScope)
+)
+
 private sealed interface QueryWhen {
     data object StartIfNotAlreadyRunning : QueryWhen
     data class Completed(val value: String) : QueryWhen
@@ -293,6 +319,32 @@ class ScopeStoreTest {
         advanceUntilIdle()
 
         assertEquals("cancelled", store.state.marker, "a cancelled effect's completion must never arrive")
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testDeactivatingAChildCancelsItsOwnRunningEffect() = runTest {
+        val store = createScope(parentWithChildConfig, effectScope = this)
+
+        store.send(ParentWithChildWhen.ActivateChild)
+        val childStore = store.childStore(childSubScope)!!
+        childStore.send(CancelWhen.Start)
+        // SlowEffect is now launched under the child, suspended in delay(10_000) — genuinely ongoing.
+        assertEquals("started", childStore.state.marker)
+
+        store.send(ParentWithChildWhen.DeactivateChild)
+        assertEquals(null, store.state.child, "child was deactivated")
+
+        // If deactivateChild only dropped the child from activeChildren without cancelling its
+        // real Job, advancing past the 10s delay here would let SlowEffect complete anyway,
+        // silently updating this now-orphaned store's own state that nothing in the tree
+        // references anymore.
+        advanceUntilIdle()
+
+        assertEquals(
+            "started", childStore.state.marker,
+            "a deactivated child's own running effect must never complete"
+        )
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
