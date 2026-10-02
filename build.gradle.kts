@@ -2,6 +2,9 @@ import java.io.File
 
 plugins {
     kotlin("jvm")
+    // Only for the Advanced/02 code-generation example's test sources (see kspTest below) — the
+    // library itself has no KSP dependency, and no tutorial before Advanced/02 needs one either.
+    id("com.google.devtools.ksp")
 }
 
 group = "statoscope"
@@ -36,6 +39,10 @@ dependencies {
     // createScope's effectScope, driven with runTest { ... advanceUntilIdle() }, instead of a
     // flaky Thread.sleep + poll.
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    // Advanced/02's @Reducer/@SubState/@OnChildAction example — see CODEGEN.md. Test-only: the
+    // library's own main sources have no KSP dependency.
+    testImplementation(project(":codegen"))
+    kspTest(project(":codegen-processor"))
 }
 
 tasks.test {
@@ -107,7 +114,8 @@ val extractDocSnippets by tasks.registering {
         "src/test/kotlin/statoscope/examples/tutorial03/MiddlewareExample.kt",
         "src/test/kotlin/statoscope/examples/tutorial04/InjectionExample.kt",
         "src/test/kotlin/statoscope/examples/tutorial05/ScopesExample.kt",
-        "src/test/kotlin/statoscope/examples/advanced/testing/AdvancedTestingExample.kt"
+        "src/test/kotlin/statoscope/examples/advanced/testing/AdvancedTestingExample.kt",
+        "src/test/kotlin/statoscope/examples/advanced/codegen/CodeGenerationExample.kt"
     )
     val outputDir = layout.projectDirectory.dir("docs/_generated")
 

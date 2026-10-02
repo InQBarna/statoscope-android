@@ -19,9 +19,10 @@
 > Unlike Tutorial 03's `Middleware` (from-scratch design, no sibling to lean on),
 > this tutorial has a strong precedent: `statoscope-zustand`'s `InjectionKey<T>` (see
 > `src/injection.ts`) is ported here almost directly, generic `resolve<T>` in place of TS's
-> single type-erased `Inject` function. No ancestor-chain resolution yet either (that's
-> `SuperstateKey`'s job over there, and scope composition's here) — resolution is just "own
-> `provide` → the key's default value" for now.
+> single type-erased `Inject` function. Resolution here is "own `provide` → an ancestor's, nearest
+> first → the key's default value" — the ancestor-chain part only matters once scopes are
+> composed (Tutorial 05), so this tutorial's own examples (no composition yet) never see more than
+> "own `provide` → default."
 
 ## Designing dependencies
 

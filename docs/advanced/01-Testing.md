@@ -233,6 +233,8 @@ class NewsFeedListIntegrationTest {
 
 `StoreTestPlan` has one more tool not shown above: `withProvide(entries)`, called before any
 `with()`, overrides a *root* config's `InjectionKey`s for the test — the composed-tree equivalent
-of `TestPlan.withProvide`. It only ever reaches the root's own `dependencies.resolve()` calls, not
-a descendant's — `InjectionKey` resolution is deliberately not inherited down a tree (unlike
-`SuperstateKey`, which is). See `StoreTestPlanCompositionTest.kt` for a worked example.
+of `TestPlan.withProvide`. `InjectionKey` resolution walks the ancestor chain (see
+`PARITY_AUDIT.md`'s Issue 9), so this override reaches every descendant's `dependencies.resolve()`
+calls too, not just the root's own, unless an intermediate level's own `provide` overrides the
+same key first — same nearest-ancestor-wins precedence as `SuperstateKey`. See
+`StoreTestPlanCompositionTest.kt` for a worked example.

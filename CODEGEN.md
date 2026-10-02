@@ -10,10 +10,23 @@ answer to "how do we get iOS's `@Reducer` macro ergonomics without a macro syste
   `<Reducer>.config: ScopeConfig<State, When>` extension property, `SubScope` wiring included. A
   consuming module adds this to its `ksp(...)` configuration, never `implementation`.
 
-Neither is applied to any module in this repo — like `:testing`/`:android`, this is a library
-capability for consumers to opt into (an app module, `statoscope-kotlin-examples`), not something
-the tutorials themselves use. `docs/05-Scopes.md` and its `SubScope(...)`-by-hand example stay as
-the reference/teaching path.
+Applied in exactly one place in this repo as of 2026-10-02: the root module's **test** sources
+only (`build.gradle.kts`'s `kspTest(project(":codegen-processor"))`), backing
+**Advanced/02: Code Generation** (`docs/advanced/02-CodeGeneration.md`) — the same news-feed
+domain as Tutorial 05, rebuilt with these annotations, side by side with the hand-written version
+for direct comparison. The library's own **main** sources still have no KSP dependency at all;
+`docs/05-Scopes.md` and its `SubScope(...)`-by-hand example stay as the primary reference/teaching
+path, with Advanced/02 as the "here's the shorter version" follow-up. Not yet applied in
+`statoscope-kotlin-examples` or any app module — a consumer there adds the same two lines
+Advanced/02's own `build.gradle.kts` entry does.
+
+**Found while building Advanced/02**: a `SubScope` that also needs a `superstateKey` can't be
+expressed through the annotations at all today — `@SubState` never attaches one (see "Design
+decisions" below), and there's no escape hatch to add one to a generated `SubScope` after the
+fact either. Tutorial 05's own favorites-limit feature needed exactly this (a live ancestor read
+before deciding), so Advanced/02's version restructures that one feature to avoid needing
+`superstateKey` instead of demonstrating it — a real, current limitation of the codegen path, not
+a doc gap.
 
 ## Shape
 
