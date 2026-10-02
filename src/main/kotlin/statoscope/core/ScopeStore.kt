@@ -144,9 +144,10 @@ fun <State, When> createScope(
 ): ScopeStore<State, When> = ScopeStoreImpl(config, effectScope, inheritedDependencies = null)
 
 /**
- * Resolves [SuperstateKey]s for a store with no ancestor — the root of a composed tree, or any
- * plain, uncomposed [createScope] call. [InjectionKey] resolution never reaches here (see
- * [ScopeStoreImpl.dependencies]), so only the [SuperstateKey] overload can ever actually run.
+ * The terminal link in the ancestor chain — reached once no scope from the root down to the
+ * caller declared an override for either kind of key. For [InjectionKey], that means
+ * [InjectionKey.defaultValue] genuinely applies; for [SuperstateKey], it means nothing on the
+ * path declared it at all, which is always a programmer error (see [SuperstateKey]'s own doc).
  */
 private object NoAncestorDependencies : Dependencies {
     override fun <T> resolve(key: InjectionKey<T>): T = key.defaultValue
@@ -155,17 +156,23 @@ private object NoAncestorDependencies : Dependencies {
 }
 
 /**
- * A store's real [Dependencies]: [InjectionKey]s always resolve from this scope's own
- * `config.provide` ([ownInjection]) — no ancestor-chain resolution for those, by design (see
- * [InjectionKey]'s doc) — while [SuperstateKey]s fall through to whatever was inherited from an
- * ancestor ([superstateFallback]), or to [NoAncestorDependencies] at the root.
+ * A store's real [Dependencies]: an [InjectionKey] resolves from this scope's own `config.provide`
+ * ([ownInjection]) if present there, otherwise falls through to [ancestorFallback] — whatever was
+ * inherited from the parent, itself a [CombinedDependencies] (or a [SuperstateDependencies]
+ * wrapping one) all the way up to [NoAncestorDependencies] at the root — so a composition root's
+ * `provide` reaches every descendant with zero plumbing in between, and the *nearest* ancestor
+ * that overrides a key wins over a farther one. [SuperstateKey]s always go straight to
+ * [ancestorFallback] — they're never looked up locally at all, only via a [SubScope.superstateKey]
+ * declared somewhere on the path (see [SuperstateDependencies]).
  */
+@OptIn(StatoscopeInternalApi::class)
 private class CombinedDependencies(
-    private val ownInjection: Dependencies,
-    private val superstateFallback: Dependencies
+    private val ownInjection: MapDependencies,
+    private val ancestorFallback: Dependencies
 ) : Dependencies {
-    override fun <T> resolve(key: InjectionKey<T>): T = ownInjection.resolve(key)
-    override fun <T> resolve(key: SuperstateKey<T>): T = superstateFallback.resolve(key)
+    override fun <T> resolve(key: InjectionKey<T>): T =
+        if (ownInjection.hasOwnProvide(key)) ownInjection.resolve(key) else ancestorFallback.resolve(key)
+    override fun <T> resolve(key: SuperstateKey<T>): T = ancestorFallback.resolve(key)
 }
 
 /**
@@ -197,7 +204,7 @@ private class ScopeStoreImpl<State, When>(
 
     private val dependencies: Dependencies = CombinedDependencies(
         ownInjection = MapDependencies(config.provide),
-        superstateFallback = inheritedDependencies ?: NoAncestorDependencies
+        ancestorFallback = inheritedDependencies ?: NoAncestorDependencies
     )
     private val logPrefix: String = scopeLogPrefix(config.initial, this)
     private val effectIdCounter = AtomicLong(0)

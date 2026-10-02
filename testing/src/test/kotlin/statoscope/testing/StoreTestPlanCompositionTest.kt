@@ -99,10 +99,12 @@ private val rootConfig = ScopeConfig<RootState, RootWhen>(
 )
 
 // --- A separate, minimal fixture just for withProvide — kept apart from the 3-level tree above
-// because InjectionKey resolution is deliberately NOT inherited down a composed tree (see
-// InjectionKey's own doc): a root's withProvide only ever reaches its own reducer's
-// dependencies.resolve(), never a descendant's, so testing it against a real child would test
-// the wrong thing. ---
+// since it's a different concern (injection, not child-event bubbling), not because the override
+// can't reach a descendant: InjectionKey resolution now walks the ancestor chain (see
+// PARITY_AUDIT.md's ancestor-tree DI entry), so withProvide's override — applied to the ROOT's
+// own config.provide, see RootStoreTestPlan.runTest() — reaches every descendant's
+// dependencies.resolve() too, not just the root's own, as proven by
+// testWithProvideReachesAChildsDependenciesResolveToo below. ---
 
 private val greetingKey = InjectionKey(defaultValue = "Hello")
 
@@ -116,6 +118,27 @@ private val greeterConfig = ScopeConfig<GreeterState, GreeterWhen>(
             is GreeterWhen.Greet -> state.copy(greeted = dependencies.resolve(greetingKey))
         }
     }
+)
+
+// A single level of composition above the greeter fixture, used only by
+// testWithProvideReachesAChildsDependenciesResolveToo.
+private data class GreeterHostState(val greeter: GreeterState? = null)
+private sealed interface GreeterHostWhen { data object ActivateGreeter : GreeterHostWhen }
+
+private val greeterSubScope = SubScope<GreeterHostState, GreeterHostWhen, GreeterState, GreeterWhen>(
+    config = greeterConfig,
+    get = { it.greeter },
+    set = { state, greeter -> state.copy(greeter = greeter) }
+)
+
+private val greeterHostConfig = ScopeConfig<GreeterHostState, GreeterHostWhen>(
+    initial = GreeterHostState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is GreeterHostWhen.ActivateGreeter -> state.copy(greeter = GreeterState())
+        }
+    },
+    subScopes = listOf(greeterSubScope)
 )
 
 // --- A separate fixture just for completeEffect() — FixedDetailEffect above returns ArticleWhen
@@ -183,6 +206,21 @@ class StoreTestPlanCompositionTest {
         givenStore(greeterConfig)
             .on(GreeterWhen.Greet)
             .thenEquals(GreeterState::greeted, "Hello")
+            .runTest()
+    }
+
+    @Test
+    fun testWithProvideReachesAChildsDependenciesResolveToo() {
+        // withProvide overrides the ROOT's own config.provide — this proves that override now
+        // reaches a CHILD's dependencies.resolve() call too, with zero plumbing at the host
+        // level, now that InjectionKey resolution walks the ancestor chain.
+        givenStore(greeterHostConfig)
+            .withProvide(listOf(greetingKey.pair("Bonjour")))
+            .on(GreeterHostWhen.ActivateGreeter)
+            .with(greeterSubScope)
+            .on(GreeterWhen.Greet)
+            .thenEquals(GreeterState::greeted, "Bonjour")
+            .pop()
             .runTest()
     }
 

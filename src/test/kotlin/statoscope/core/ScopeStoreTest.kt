@@ -254,6 +254,94 @@ private val broadcastRootConfig = ScopeConfig<BroadcastRootState, BroadcastRootW
     }
 )
 
+// Three real levels (Root -> Middle -> Grandchild) proving InjectionKey resolution now walks the
+// ancestor chain — a provider declared only at the Root reaches a Grandchild with zero plumbing
+// at the Middle level, and a closer override wins over a farther one.
+private val ancestorGreetingKey = InjectionKey(defaultValue = "default-greeting")
+
+private data class AncestorGrandchildState(val greeting: String = "")
+private sealed interface AncestorGrandchildWhen {
+    data object ReadGreeting : AncestorGrandchildWhen
+}
+private val ancestorGrandchildConfig = ScopeConfig<AncestorGrandchildState, AncestorGrandchildWhen>(
+    initial = AncestorGrandchildState(),
+    update = { state, action, _, dependencies ->
+        when (action) {
+            is AncestorGrandchildWhen.ReadGreeting -> state.copy(greeting = dependencies.resolve(ancestorGreetingKey))
+        }
+    }
+)
+
+private data class AncestorMiddleState(val grandchild: AncestorGrandchildState? = null)
+private sealed interface AncestorMiddleWhen {
+    data object ActivateGrandchild : AncestorMiddleWhen
+}
+private val ancestorMiddleGrandchildSubScope =
+    SubScope<AncestorMiddleState, AncestorMiddleWhen, AncestorGrandchildState, AncestorGrandchildWhen>(
+        config = ancestorGrandchildConfig,
+        get = { it.grandchild },
+        set = { state, grandchild -> state.copy(grandchild = grandchild) }
+    )
+private val ancestorMiddleUpdate: Reducer<AncestorMiddleState, AncestorMiddleWhen> = { state, action, _, _ ->
+    when (action) {
+        is AncestorMiddleWhen.ActivateGrandchild -> state.copy(grandchild = AncestorGrandchildState())
+    }
+}
+
+// Deliberately no `provide` override — proving the grandchild still resolves the root's value
+// with zero plumbing at this level.
+private val ancestorMiddleConfigNoOverride = ScopeConfig(
+    initial = AncestorMiddleState(),
+    update = ancestorMiddleUpdate,
+    subScopes = listOf(ancestorMiddleGrandchildSubScope)
+)
+
+// A second Middle config, identical except it DOES override the key — for the
+// nearest-ancestor-wins test, kept separate so the no-override tree above stays a clean proof on
+// its own.
+private val ancestorMiddleConfigWithOverride = ScopeConfig(
+    initial = AncestorMiddleState(),
+    update = ancestorMiddleUpdate,
+    subScopes = listOf(ancestorMiddleGrandchildSubScope),
+    provide = listOf(ancestorGreetingKey.pair("hello-from-middle"))
+)
+
+private data class AncestorRootState(val middle: AncestorMiddleState? = null)
+private sealed interface AncestorRootWhen {
+    data object ActivateMiddle : AncestorRootWhen
+}
+private val ancestorRootUpdate: Reducer<AncestorRootState, AncestorRootWhen> = { state, action, _, _ ->
+    when (action) {
+        is AncestorRootWhen.ActivateMiddle -> state.copy(middle = AncestorMiddleState())
+    }
+}
+
+private val ancestorRootMiddleSubScope =
+    SubScope<AncestorRootState, AncestorRootWhen, AncestorMiddleState, AncestorMiddleWhen>(
+        config = ancestorMiddleConfigNoOverride,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) }
+    )
+private val ancestorRootConfig = ScopeConfig(
+    initial = AncestorRootState(),
+    update = ancestorRootUpdate,
+    subScopes = listOf(ancestorRootMiddleSubScope),
+    provide = listOf(ancestorGreetingKey.pair("hello-from-root"))
+)
+
+private val ancestorRootMiddleWithOverrideSubScope =
+    SubScope<AncestorRootState, AncestorRootWhen, AncestorMiddleState, AncestorMiddleWhen>(
+        config = ancestorMiddleConfigWithOverride,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) }
+    )
+private val ancestorRootConfigWithMiddleOverride = ScopeConfig(
+    initial = AncestorRootState(),
+    update = ancestorRootUpdate,
+    subScopes = listOf(ancestorRootMiddleWithOverrideSubScope),
+    provide = listOf(ancestorGreetingKey.pair("hello-from-root"))
+)
+
 class ScopeStoreTest {
 
     // scopeEffectsDisabledInUnitTests defaults to true under JUnit (see ScopeStore.kt) so a test
@@ -561,6 +649,52 @@ class ScopeStoreTest {
         assertEquals(
             0, root.state.grandchildTapsSeenAtRoot,
             "a store's own self-sent event must never trigger its own onDescendantAction"
+        )
+    }
+
+    // MARK: - Ancestor-tree InjectionKey resolution
+
+    @Test
+    fun testInjectionKeyResolvesFromAnAncestorWithNoIntermediatePlumbing() {
+        val root = createScope(ancestorRootConfig)
+        root.send(AncestorRootWhen.ActivateMiddle)
+        val middle = root.childStore(ancestorRootMiddleSubScope)!!
+        middle.send(AncestorMiddleWhen.ActivateGrandchild)
+        val grandchild = middle.childStore(ancestorMiddleGrandchildSubScope)!!
+
+        grandchild.send(AncestorGrandchildWhen.ReadGreeting)
+
+        assertEquals(
+            "hello-from-root", grandchild.state.greeting,
+            "the grandchild should resolve the root's provide with zero plumbing at the middle level"
+        )
+    }
+
+    @Test
+    fun testInjectionKeyResolutionPrefersTheNearestAncestorsOverride() {
+        val root = createScope(ancestorRootConfigWithMiddleOverride)
+        root.send(AncestorRootWhen.ActivateMiddle)
+        val middle = root.childStore(ancestorRootMiddleWithOverrideSubScope)!!
+        middle.send(AncestorMiddleWhen.ActivateGrandchild)
+        val grandchild = middle.childStore(ancestorMiddleGrandchildSubScope)!!
+
+        grandchild.send(AncestorGrandchildWhen.ReadGreeting)
+
+        assertEquals(
+            "hello-from-middle", grandchild.state.greeting,
+            "the nearer ancestor's override should win over the root's"
+        )
+    }
+
+    @Test
+    fun testInjectionKeyFallsBackToItsOwnDefaultWhenNoAncestorProvidesIt() {
+        val orphan = createScope(ancestorGrandchildConfig)
+
+        orphan.send(AncestorGrandchildWhen.ReadGreeting)
+
+        assertEquals(
+            "default-greeting", orphan.state.greeting,
+            "no ancestor at all exists here, so the key's own defaultValue must apply"
         )
     }
 }
