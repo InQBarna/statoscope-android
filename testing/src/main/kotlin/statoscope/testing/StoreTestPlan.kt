@@ -67,6 +67,35 @@ abstract class StoreTestPlan<State, When, Self : StoreTestPlan<State, When, Self
         rootSteps.forEach { it(store) }
     }
 
+    /** A snapshot copy of every step recorded so far — what [FORK] replays onto a fresh store. */
+    internal fun stepsSnapshot(): List<(ScopeStore<State, When>) -> Unit> = rootSteps.toList()
+
+    /** Seeds this (freshly built, forked) plan's own steps with [steps] — see [buildLinkedFork]. */
+    internal fun seedSteps(steps: List<(ScopeStore<State, When>) -> Unit>) {
+        rootSteps += steps
+    }
+
+    /**
+     * The real, ultimate root of this plan — itself for [RootStoreTestPlan], the [with]-chain's
+     * [WithStoreTestPlan.pop] target all the way up for any nested frame. Lets [FORK] register the
+     * alternate branch it builds for deferred execution, and reach the steps-so-far it needs to
+     * replay, regardless of how deep into a [with] chain it was called.
+     */
+    internal abstract fun rootPlan(): RootStoreTestPlan<*, *>
+
+    /** Delegates up to the root (see [rootPlan]) to record a fork branch for [runTest] to run. */
+    internal abstract fun registerFork(action: () -> Unit)
+
+    /**
+     * Builds a new, independent plan of this same navigational shape (same [with]-depth, same
+     * [SubScope]s) whose own steps start as a snapshot copy of every step recorded on this plan so
+     * far — never sharing [this]'s own list, so further calls on either plan after the fork don't
+     * leak into the other. The returned plan is never registered with [TestPlanRegistry]: only the
+     * real root it ultimately bottoms out in tracks "forgot `runTest()`," and [FORK] always runs
+     * it for the caller via [registerFork], never leaving it for the caller to run directly.
+     */
+    internal abstract fun buildLinkedFork(): Self
+
     /** Dispatch [action] through the current frame's real `send()`. */
     fun on(action: When): Self {
         addStep { store -> store.send(action) }
@@ -137,21 +166,51 @@ abstract class StoreTestPlan<State, When, Self : StoreTestPlan<State, When, Self
         subScope: SubScope<State, When, ChildState, ChildWhen>
     ): WithStoreTestPlan<State, When, Self, ChildState, ChildWhen> = WithStoreTestPlan(self(), subScope)
 
+    /**
+     * Tests an alternate branch from the exact same starting point as every step recorded on this
+     * plan so far, without disturbing the "main" branch [self] continues on. Builds a second,
+     * independent store (via [buildLinkedFork]) that replays this plan's prior steps first, then
+     * dispatches [elseWhen] against it and runs [elseFlow] for any further assertions — deferred
+     * until [runTest], same as every other step. Mirrors Swift's `StoreTestPlan.FORK(_:_:)`.
+     *
+     * ```kotlin
+     * givenStore(config)
+     *     .on(When.StartedLoad)
+     *     .FORK(When.LoadFailed) { it.thenEquals(State::isLoading, false) }
+     *     .onOldestEffectCompletes(When.LoadSucceeded(data))
+     *     .thenEquals(State::isLoading, false)
+     *     .runTest()
+     * ```
+     */
+    fun FORK(elseWhen: When, elseFlow: (Self) -> Unit = {}): Self {
+        val forkedPlan = buildLinkedFork()
+        forkedPlan.on(elseWhen)
+        elseFlow(forkedPlan)
+        val forkedRoot = forkedPlan.rootPlan()
+        rootPlan().registerFork { forkedRoot.runOwnStepsAndForks() }
+        return self()
+    }
+
     /** Builds the real store (root only) and runs every recorded step, in order. */
     abstract fun runTest()
 }
 
 /** The plan [givenStore] returns — the only [StoreTestPlan] that actually builds a real store. */
 class RootStoreTestPlan<State, When> internal constructor(
-    private val config: ScopeConfig<State, When>
+    private val config: ScopeConfig<State, When>,
+    private val isAFork: Boolean = false
 ) : StoreTestPlan<State, When, RootStoreTestPlan<State, When>>() {
 
-    private val pendingMarker = PendingTestPlan()
+    // Forks are never independently tracked: FORK() always runs the one it builds itself (see
+    // registerFork/runOwnStepsAndForks below), so there's no "forgot runTest()" case for it to
+    // ever be forgotten — mirrors Swift's own `!isAFork` guard skipping its deinit check.
+    private val pendingMarker: PendingTestPlan? = if (isAFork) null else PendingTestPlan()
     private var hasRun = false
     private var provideOverride: List<Pair<InjectionKey<*>, Any?>>? = null
+    private val forks = mutableListOf<() -> Unit>()
 
     init {
-        TestPlanRegistry.register(pendingMarker)
+        pendingMarker?.let(TestPlanRegistry::register)
     }
 
     /**
@@ -170,11 +229,35 @@ class RootStoreTestPlan<State, When> internal constructor(
      * "still counts as run even if an assertion fails" ordering.
      */
     override fun runTest() {
+        check(!isAFork) { "Don't call runTest() on a forked StoreTestPlan — FORK() runs it for you" }
         check(!hasRun) { "Don't call runTest() more than once on the same StoreTestPlan" }
         hasRun = true
-        TestPlanRegistry.unregister(pendingMarker)
+        pendingMarker?.let(TestPlanRegistry::unregister)
+        runOwnStepsAndForks()
+    }
+
+    /**
+     * Builds this plan's own store and runs its own steps, then every fork branched off it —
+     * shared by [runTest] (the real, caller-visible root) and by the deferred action [FORK]
+     * registers for a forked root (reached only via [StoreTestPlan.registerFork], never directly).
+     */
+    internal fun runOwnStepsAndForks() {
         val store = createScope(config.copy(provide = provideOverride ?: config.provide))
         runSteps(store)
+        forks.forEach { it() }
+    }
+
+    override fun rootPlan(): RootStoreTestPlan<*, *> = this
+
+    override fun registerFork(action: () -> Unit) {
+        forks += action
+    }
+
+    override fun buildLinkedFork(): RootStoreTestPlan<State, When> {
+        val forked = RootStoreTestPlan(config, isAFork = true)
+        forked.provideOverride = provideOverride
+        forked.seedSteps(stepsSnapshot())
+        return forked
     }
 }
 
@@ -206,6 +289,14 @@ class WithStoreTestPlan<ParentState, ParentWhen, ParentSelf, ChildState, ChildWh
     fun pop(): ParentSelf = parent
 
     override fun runTest() = parent.runTest()
+
+    override fun rootPlan(): RootStoreTestPlan<*, *> = parent.rootPlan()
+
+    override fun registerFork(action: () -> Unit) = parent.registerFork(action)
+
+    /** Forks [parent] itself, then re-wraps the forked parent in a [WithStoreTestPlan] of the same shape. */
+    override fun buildLinkedFork(): WithStoreTestPlan<ParentState, ParentWhen, ParentSelf, ChildState, ChildWhen> =
+        WithStoreTestPlan(parent.buildLinkedFork(), subScope)
 }
 
 /** Starts a composed-tree test plan for the real store [config] would build via [createScope]. */

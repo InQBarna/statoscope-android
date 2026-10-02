@@ -23,6 +23,7 @@ private data class ChildState(val loading: Boolean = false, val loadedValue: Str
 private sealed interface ChildWhen {
     data object Load : ChildWhen
     data class Loaded(val value: String) : ChildWhen
+    data class LoadFailed(val reason: String) : ChildWhen
 }
 
 /** Never actually run by any test here — every completion is simulated via
@@ -40,6 +41,7 @@ private val childConfig = ScopeConfig<ChildState, ChildWhen>(
                 state.copy(loading = true)
             }
             is ChildWhen.Loaded -> state.copy(loading = false, loadedValue = action.value)
+            is ChildWhen.LoadFailed -> state.copy(loading = false, loadedValue = "error:${action.reason}")
         }
     }
 )
@@ -104,5 +106,51 @@ class StoreTestPlanTest {
         plan.runTest()
 
         assertFailsWith<IllegalStateException> { plan.runTest() }
+    }
+
+    @Test
+    fun testForkAtTheChildLevelTestsTheFailurePathWithoutAffectingTheMainSuccessPath() {
+        givenStore(parentConfig)
+            .on(ParentWhen.ActivateChild)
+            .with(childSubScope)
+            .on(ChildWhen.Load)
+            .FORK(ChildWhen.LoadFailed("network")) {
+                it.then { state -> assertEquals("error:network", state.loadedValue) }
+                    .pop()
+                    .thenEquals(ParentState::loadedCount, 0) // LoadFailed never bubbles up
+            }
+            .onOldestEffectCompletes(ChildWhen.Loaded("real-value"))
+            .then { state -> assertEquals("real-value", state.loadedValue) }
+            .pop()
+            .thenEquals(ParentState::loadedCount, 1) // the main path's own Loaded did bubble up
+            .runTest()
+    }
+
+    @Test
+    fun testForkAtTheRootLevelRunsAgainstItsOwnIndependentStore() {
+        givenStore(parentConfig)
+            .FORK(ParentWhen.ChildReportedLoaded) {
+                it.thenEquals(ParentState::loadedCount, 1)
+            }
+            .thenEquals(ParentState::loadedCount, 0) // the main path never sent ChildReportedLoaded
+            .runTest()
+    }
+
+    @Test
+    fun testForkCanBeNestedInsideAnotherForksElseFlow() {
+        givenStore(parentConfig)
+            .on(ParentWhen.ActivateChild)
+            .with(childSubScope)
+            .FORK(ChildWhen.LoadFailed("first")) { firstFork ->
+                firstFork
+                    .FORK(ChildWhen.LoadFailed("nested")) { nestedFork ->
+                        nestedFork.then { state -> assertEquals("error:nested", state.loadedValue) }
+                    }
+                    .then { state -> assertEquals("error:first", state.loadedValue) }
+            }
+            .on(ChildWhen.Load)
+            .thenEquals(ChildState::loading, true) // the main path never dispatched either LoadFailed
+            .pop()
+            .runTest()
     }
 }
