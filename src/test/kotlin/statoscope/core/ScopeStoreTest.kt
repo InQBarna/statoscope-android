@@ -17,8 +17,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
-import kotlin.test.AfterTest
-import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
@@ -258,6 +256,31 @@ private val broadcastRootConfig = ScopeConfig<BroadcastRootState, BroadcastRootW
 
 class ScopeStoreTest {
 
+    // scopeEffectsDisabledInUnitTests defaults to true under JUnit (see ScopeStore.kt) so a test
+    // calling createScope(...) directly doesn't accidentally run real effects. A test whose whole
+    // point is proving genuine effect execution (real Job launched, real cancellation, real
+    // cross-thread delivery) opts back in with this — scoped to exactly the one test that calls
+    // it, via try/finally, so the flag can never leak into any other test in this class.
+    //
+    // NOT a @BeforeTest/@AfterTest pair: kotlin.test's @BeforeTest/@AfterTest apply to every test
+    // method in the class, unconditionally — there is no per-method setup/teardown in
+    // Kotlin/JUnit5. An earlier version of this file had exactly that mistake (a @BeforeTest
+    // that set this flag false "for the one test that needs it"), which silently flipped it false
+    // for every other test in the class too, including ones whose correctness depends on it being
+    // true (completeEffect() relies on an effect being tracked as pending-but-never-launched
+    // bookkeeping; with real effects enabled, a same-tick-completing effect could remove itself
+    // from bookkeeping before completeEffect() ever ran, racing non-deterministically). Found via
+    // exactly that symptom: testCompleteEffectFindsTheRequestedTypeAmongMultiplePendingAndReplaysItsRealMap
+    // failed intermittently until this was fixed.
+    private fun withRealEffectsEnabled(block: () -> Unit) {
+        scopeEffectsDisabledInUnitTests = false
+        try {
+            block()
+        } finally {
+            scopeEffectsDisabledInUnitTests = true
+        }
+    }
+
     @Test
     fun testInitialStateIsConfigInitial() {
         val store = createScope(testConfig)
@@ -278,20 +301,22 @@ class ScopeStoreTest {
 
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun testStateFlowEmitsWhenAnEffectCompletionUpdatesState() = runTest {
-        scopeEffectsDisabledInUnitTests = false
-        val store = createScope(effectConfig, effectScope = this)
+    fun testStateFlowEmitsWhenAnEffectCompletionUpdatesState() = withRealEffectsEnabled {
+        runTest {
+            val store = createScope(effectConfig, effectScope = this)
 
-        val seenMarkers = mutableListOf<String>()
-        val collector = launch { store.stateFlow.collect { seenMarkers += it.marker } }
+            val seenMarkers = mutableListOf<String>()
+            val collector = launch { store.stateFlow.collect { seenMarkers += it.marker } }
 
-        store.send(TestWhen.Increment)
-        advanceUntilIdle()
-        collector.cancel()
+            store.send(TestWhen.Increment)
+            advanceUntilIdle()
+            collector.cancel()
 
-        // Only the effect's own completion event could have produced this — proves a collector
-        // sees the async, effect-driven update, not just the synchronous part of send().
-        assertTrue(seenMarkers.contains("effect-completed"), "expected stateFlow to emit the effect-driven marker, got: $seenMarkers")
+            // Only the effect's own completion event could have produced this — proves a
+            // collector sees the async, effect-driven update, not just the synchronous part of
+            // send().
+            assertTrue(seenMarkers.contains("effect-completed"), "expected stateFlow to emit the effect-driven marker, got: $seenMarkers")
+        }
     }
 
     @Test
@@ -318,38 +343,25 @@ class ScopeStoreTest {
         assertEquals(0, store.state.count, "Blocked event must never reach update()")
     }
 
-    // scopeEffectsDisabledInUnitTests defaults to true under JUnit (see ScopeStore.kt) so an
-    // app-level test calling createScope(...) directly doesn't accidentally run real effects.
-    // This test's whole point is proving effect execution genuinely works, so it opts back in —
-    // exactly the setUp/tearDown pattern Swift's own StoreEffectsTests.swift uses around its
-    // identical scopeEffectsDisabledInUnitTests flag.
-    @BeforeTest
-    fun enableRealEffects() {
-        scopeEffectsDisabledInUnitTests = false
-    }
-
-    @AfterTest
-    fun restoreEffectsDisabled() {
-        scopeEffectsDisabledInUnitTests = true
-    }
-
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun testEnqueuedEffectActuallyRunsAndFeedsBackResult() = runTest {
-        // Passing this test's own TestScope as effectScope lets advanceUntilIdle() below
-        // deterministically drive the effect's coroutine to completion — no real delay, no
-        // flaky polling.
-        val store = createScope(effectConfig, effectScope = this)
+    fun testEnqueuedEffectActuallyRunsAndFeedsBackResult() = withRealEffectsEnabled {
+        runTest {
+            // Passing this test's own TestScope as effectScope lets advanceUntilIdle() below
+            // deterministically drive the effect's coroutine to completion — no real delay, no
+            // flaky polling.
+            val store = createScope(effectConfig, effectScope = this)
 
-        store.send(TestWhen.Increment)
-        // The synchronous part of update() has run; the effect it enqueued has not yet.
-        assertEquals(1, store.state.count)
-        assertEquals("initial", store.state.marker)
+            store.send(TestWhen.Increment)
+            // The synchronous part of update() has run; the effect it enqueued has not yet.
+            assertEquals(1, store.state.count)
+            assertEquals("initial", store.state.marker)
 
-        advanceUntilIdle()
+            advanceUntilIdle()
 
-        // Only the effect's own completion event could have produced this value.
-        assertEquals("effect-completed", store.state.marker)
+            // Only the effect's own completion event could have produced this value.
+            assertEquals("effect-completed", store.state.marker)
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -366,9 +378,7 @@ class ScopeStoreTest {
     }
 
     @Test
-    fun testEffectCompletionsAlwaysArriveOnTheSameDedicatedThread() {
-        scopeEffectsDisabledInUnitTests = false
-
+    fun testEffectCompletionsAlwaysArriveOnTheSameDedicatedThread() = withRealEffectsEnabled {
         // Thread.currentThread().id (a stable OS-thread identity), not .name, proves this —
         // kotlinx.coroutines' debug mode (auto-enabled by Gradle's -ea) suffixes the thread's
         // *name* with " @coroutine#N" per coroutine, so two completions on the very same
@@ -414,18 +424,20 @@ class ScopeStoreTest {
 
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun testCancelEffectActuallyCancelsTheRunningJob() = runTest {
-        val store = createScope(cancelConfig, effectScope = this)
+    fun testCancelEffectActuallyCancelsTheRunningJob() = withRealEffectsEnabled {
+        runTest {
+            val store = createScope(cancelConfig, effectScope = this)
 
-        store.send(CancelWhen.Start)
-        // SlowEffect is now launched, suspended in delay(10_000) — genuinely ongoing, not completed.
-        store.send(CancelWhen.CancelOngoing)
+            store.send(CancelWhen.Start)
+            // SlowEffect is now launched, suspended in delay(10_000) — genuinely ongoing, not completed.
+            store.send(CancelWhen.CancelOngoing)
 
-        // If cancelEffect only removed bookkeeping without cancelling the real Job, advancing
-        // past the 10s delay here would let SlowEffect complete anyway and overwrite the marker.
-        advanceUntilIdle()
+            // If cancelEffect only removed bookkeeping without cancelling the real Job, advancing
+            // past the 10s delay here would let SlowEffect complete anyway and overwrite the marker.
+            advanceUntilIdle()
 
-        assertEquals("cancelled", store.state.marker, "a cancelled effect's completion must never arrive")
+            assertEquals("cancelled", store.state.marker, "a cancelled effect's completion must never arrive")
+        }
     }
 
     @OptIn(StatoscopeInternalApi::class)
@@ -453,28 +465,30 @@ class ScopeStoreTest {
 
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun testDeactivatingAChildCancelsItsOwnRunningEffect() = runTest {
-        val store = createScope(parentWithChildConfig, effectScope = this)
+    fun testDeactivatingAChildCancelsItsOwnRunningEffect() = withRealEffectsEnabled {
+        runTest {
+            val store = createScope(parentWithChildConfig, effectScope = this)
 
-        store.send(ParentWithChildWhen.ActivateChild)
-        val childStore = store.childStore(childSubScope)!!
-        childStore.send(CancelWhen.Start)
-        // SlowEffect is now launched under the child, suspended in delay(10_000) — genuinely ongoing.
-        assertEquals("started", childStore.state.marker)
+            store.send(ParentWithChildWhen.ActivateChild)
+            val childStore = store.childStore(childSubScope)!!
+            childStore.send(CancelWhen.Start)
+            // SlowEffect is now launched under the child, suspended in delay(10_000) — genuinely ongoing.
+            assertEquals("started", childStore.state.marker)
 
-        store.send(ParentWithChildWhen.DeactivateChild)
-        assertEquals(null, store.state.child, "child was deactivated")
+            store.send(ParentWithChildWhen.DeactivateChild)
+            assertEquals(null, store.state.child, "child was deactivated")
 
-        // If deactivateChild only dropped the child from activeChildren without cancelling its
-        // real Job, advancing past the 10s delay here would let SlowEffect complete anyway,
-        // silently updating this now-orphaned store's own state that nothing in the tree
-        // references anymore.
-        advanceUntilIdle()
+            // If deactivateChild only dropped the child from activeChildren without cancelling its
+            // real Job, advancing past the 10s delay here would let SlowEffect complete anyway,
+            // silently updating this now-orphaned store's own state that nothing in the tree
+            // references anymore.
+            advanceUntilIdle()
 
-        assertEquals(
-            "started", childStore.state.marker,
-            "a deactivated child's own running effect must never complete"
-        )
+            assertEquals(
+                "started", childStore.state.marker,
+                "a deactivated child's own running effect must never complete"
+            )
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -485,7 +499,10 @@ class ScopeStoreTest {
         store.send(QueryWhen.StartIfNotAlreadyRunning)
         assertEquals("started", store.state.marker)
 
-        // CountingSlowEffect is still suspended in its own delay(10_000) — genuinely ongoing.
+        // Deliberately no withRealEffectsEnabled here: effects.effects reflects runningEffects'
+        // bookkeeping, which is recorded regardless of scopeEffectsDisabledInUnitTests (only the
+        // real launch is skipped under the default) — this test exercises that query mechanism
+        // directly, not real execution, so the default (true) is both correct and sufficient.
         store.send(QueryWhen.StartIfNotAlreadyRunning)
         assertEquals(
             "already running, skipped", store.state.marker,
