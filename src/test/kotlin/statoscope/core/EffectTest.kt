@@ -1,7 +1,10 @@
 package statoscope.core
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 // Tests map()/pristine()/completePristine() directly — the chain-composition machinery itself,
@@ -61,5 +64,75 @@ class EffectTest {
 
         assertEquals("5", effect.completePristine(5))
         assertTrue(!ran, "completePristine must never call the real run()")
+    }
+
+    private class Failing(private val error: Throwable) : Effect<Int> {
+        override suspend fun run(): Int = throw error
+    }
+
+    @Test
+    fun testMapToResultWrapsASuccessfulRunInResultSuccess() = runTest {
+        val effect = RawFetch(1).mapToResult()
+        assertEquals(Result.success(1), effect.run())
+    }
+
+    @Test
+    fun testMapToResultWrapsAThrownExceptionInResultFailure() = runTest {
+        val boom = IllegalStateException("boom")
+        val effect = Failing(boom).mapToResult()
+        assertEquals(Result.failure<Int>(boom), effect.run())
+    }
+
+    @Test
+    fun testMapToResultComposesWithAPriorMap() = runTest {
+        val effect = RawFetch(1).map { it.toString() }.mapToResult()
+        assertEquals(Result.success("1"), effect.run())
+    }
+
+    @Test
+    fun testMapToResultNeverSwallowsCancellation() = runTest {
+        val effect = Failing(CancellationException("cancelled")).mapToResult()
+        assertFailsWith<CancellationException> { effect.run() }
+    }
+
+    @Test
+    fun testMapToResultPristineWalksBackThroughTheWrapper() {
+        val raw = RawFetch(1)
+        val mapped = raw.mapToResult()
+        assertTrue(mapped.pristine() === raw)
+    }
+
+    @Test
+    fun testMapToResultReplaysFromPristineAsASuccessWithoutCallingRun() {
+        var ran = false
+        val effect = (object : Effect<Int> {
+            override suspend fun run(): Int {
+                ran = true
+                return -1
+            }
+        }).mapToResult()
+
+        assertEquals(Result.success(5), effect.completePristine(5))
+        assertTrue(!ran, "completePristine must never call the real run()")
+    }
+
+    private enum class FetchError { NETWORK }
+
+    @Test
+    fun testMapToResultWithErrorMapperWrapsASuccessInEffectResultSuccess() = runTest {
+        val effect = RawFetch(1).mapToResult { FetchError.NETWORK }
+        assertEquals(EffectResult.Success(1), effect.run())
+    }
+
+    @Test
+    fun testMapToResultWithErrorMapperAppliesTheMapperOnFailure() = runTest {
+        val effect = Failing(IllegalStateException("boom")).mapToResult { FetchError.NETWORK }
+        assertEquals(EffectResult.Failure(FetchError.NETWORK), effect.run())
+    }
+
+    @Test
+    fun testMapToResultWithErrorMapperNeverSwallowsCancellation() = runTest {
+        val effect = Failing(CancellationException("cancelled")).mapToResult { FetchError.NETWORK }
+        assertFailsWith<CancellationException> { effect.run() }
     }
 }

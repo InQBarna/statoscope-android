@@ -1,5 +1,7 @@
 package statoscope.core
 
+import kotlinx.coroutines.CancellationException
+
 /**
  * A unit of asynchronous work enqueued during `update`. [T] is this effect's own natural result
  * — whatever it genuinely produces (a DTO, a list, a plain value) — not necessarily a `When`
@@ -92,3 +94,76 @@ fun <T> Effect<T>.completePristine(pristineResult: Any?): T =
 fun <T> effect(block: suspend () -> T): Effect<T> = object : Effect<T> {
     override suspend fun run(): T = block()
 }
+
+/**
+ * A typed-error counterpart to [kotlin.Result] — needed only because [kotlin.Result]'s failure
+ * side is fixed to [Throwable]. Returned by the [Effect.mapToResult] overload that takes an
+ * [errorMapper][T]; ports the typed half of Swift's `Result<Success, Failure>`
+ * (`Effect.mapToResultWithError(_:)`/`mapToResultWithErrorType(_:)`,
+ * `Sources/Statoscope/Effects/Effect.swift`).
+ */
+sealed interface EffectResult<out T, out E> {
+    data class Success<out T>(val value: T) : EffectResult<T, Nothing>
+    data class Failure<out E>(val error: E) : EffectResult<Nothing, E>
+}
+
+/**
+ * Adapts this effect so a failure thrown from [run] becomes a [Result.failure] instead of
+ * propagating unhandled to [ScopeStore]'s own logging-and-drop catch. Ports Swift's untyped
+ * `Effect.mapToResult()` directly — Kotlin's own [kotlin.Result] already fixes its failure side
+ * to [Throwable], exactly matching Swift's `Result<Success, Error>` (untyped-`Error`) case, so no
+ * separate wrapper type is needed for this overload (see [EffectResult] for the typed one).
+ *
+ * `CancellationException` is deliberately never wrapped, only rethrown — wrapping it would let
+ * cancelling this effect's job complete it with a failure result instead of actually cancelling
+ * it, breaking the cooperative-cancellation contract every other suspend function in this
+ * codebase relies on.
+ */
+fun <T> Effect<T>.mapToResult(): Effect<Result<T>> {
+    val original = this
+    return object : Effect<Result<T>>, PristineHolder {
+        override val pristine: Effect<*> = original.pristine()
+
+        override suspend fun run(): Result<T> = runCatchingEffect { original.run() }
+
+        override fun applyFromPristine(rawResult: Any?): Result<T> = runCatchingEffect {
+            @Suppress("UNCHECKED_CAST")
+            ((original as? PristineHolder)?.applyFromPristine(rawResult) ?: rawResult) as T
+        }
+    }
+}
+
+/**
+ * Same as [mapToResult] but with a typed error produced by [errorMapper] — ports Swift's
+ * `Effect.mapToResultWithError(_:)`. Reach for the no-argument [mapToResult] instead when the
+ * error doesn't need a narrower type than [Throwable].
+ */
+fun <T, E> Effect<T>.mapToResult(errorMapper: (Throwable) -> E): Effect<EffectResult<T, E>> {
+    val original = this
+    return object : Effect<EffectResult<T, E>>, PristineHolder {
+        override val pristine: Effect<*> = original.pristine()
+
+        override suspend fun run(): EffectResult<T, E> =
+            runCatchingEffect { original.run() }.toEffectResult(errorMapper)
+
+        override fun applyFromPristine(rawResult: Any?): EffectResult<T, E> = runCatchingEffect {
+            @Suppress("UNCHECKED_CAST")
+            ((original as? PristineHolder)?.applyFromPristine(rawResult) ?: rawResult) as T
+        }.toEffectResult(errorMapper)
+    }
+}
+
+private inline fun <T> runCatchingEffect(block: () -> T): Result<T> =
+    try {
+        Result.success(block())
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
+
+private fun <T, E> Result<T>.toEffectResult(errorMapper: (Throwable) -> E): EffectResult<T, E> =
+    fold(
+        onSuccess = { EffectResult.Success(it) },
+        onFailure = { EffectResult.Failure(errorMapper(it)) }
+    )
