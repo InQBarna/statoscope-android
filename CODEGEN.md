@@ -76,15 +76,24 @@ reference identity — an extension `get()` property (or building `SubScope(...)
 silently rebuild a *different* instance on every access, breaking `childStore()` for any caller
 outside the generated file. Found and fixed during development, not a guess.
 
-**"Multi-level" responsiveness — a grandparent reacting to a grandchild's event — needs no
-separate mechanism**, and this was checked against the real Swift source before building
-anything: `Store.swift`'s `updateSubscope<Child: ScopeImplementation>` only ever delivers one
-direct-child event at a time, exactly like `@OnChildAction`. Swift's apparent "multi-level" reach
-is the same pattern available here: an intermediate reducer's own `@OnChildAction` relays a
-child's event *unchanged*, wrapped as an associated value of its own `When`; the level above
-matches into that wrapped value. Proven end to end, not just compiled — a real `ScopeStore`, a
-`send()` on the leaf article store, and the root's own state reflecting it two levels up
-(`SubScopeProcessorTest.testGeneratedConfigWiresThreeRealLevelsWithZeroHandWrittenSubScopes`).
+**"Multi-level" responsiveness — a grandparent reacting to a grandchild's event — today needs an
+explicit relay, one level at a time.** An earlier version of this doc claimed this was "checked
+against the real Swift source" and that Swift's own `Store.swift` only ever delivers one
+direct-child event at a time too — **that claim was false**, and has since been corrected in two
+other places in this repo (`codegen/.../OnChildAction.kt`'s own doc comment, and
+`PARITY_AUDIT.md`'s Issue 7) but was never fixed here until now. Swift's
+`callParentEnclosedHierarchialUpdate`/`allHierarchialScopeMiddlewareParents`
+(`ScopeImplementation.swift`) actually **broadcast** the original, unmodified event to every
+`MiddlewareReducer`-conforming ancestor at any depth — a grandparent sees a grandchild's raw
+`When` type directly, no relay needed. Kotlin's `@OnChildAction` has no equivalent single generic
+dispatch point a broadcast could invoke uniformly; reaching a grandparent here means an
+intermediate reducer's own `@OnChildAction` relays the child's event *unchanged*, wrapped as an
+associated value of its own `When`, and the level above matches into that wrapped value. This
+one-hop-plus-relay mechanism is real and proven end to end — a real `ScopeStore`, a `send()` on
+the leaf article store, and the root's own state reflecting it two levels up
+(`SubScopeProcessorTest.testGeneratedConfigWiresThreeRealLevelsWithZeroHandWrittenSubScopes`) —
+it just isn't Swift's broadcast. See `PARITY_AUDIT.md`'s Issue 7 for the full reasoning and the
+target of eventual broadcast reach on both platforms, not yet designed for Kotlin.
 
 ## What's still real, hand-written work, and why
 
