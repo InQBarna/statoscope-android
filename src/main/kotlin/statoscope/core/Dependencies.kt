@@ -42,14 +42,31 @@ interface Dependencies {
 @StatoscopeInternalApi
 class MapDependencies(provide: List<Pair<InjectionKey<*>, Any?>>) : Dependencies {
 
-    private val provided: Map<InjectionKey<*>, Any?> = provide.toMap()
+    // Mutable, not just built once from `provide` — see `override` below, what
+    // `ScopeStoreImpl.inject` actually calls. Reads and writes both go through the same
+    // synchronized block (see `override`) so a resolve() racing a concurrent inject() from
+    // another thread never sees a half-written map.
+    private val provided: MutableMap<InjectionKey<*>, Any?> = provide.toMap().toMutableMap()
 
-    /** Whether *this* scope's own `provide` list overrides [key] — not whether any ancestor does. */
-    internal fun hasOwnProvide(key: InjectionKey<*>): Boolean = provided.containsKey(key)
+    /** Whether *this* scope's own `provide` list (or a later [override]) covers [key] — not whether any ancestor does. */
+    internal fun hasOwnProvide(key: InjectionKey<*>): Boolean = synchronized(provided) { provided.containsKey(key) }
+
+    /**
+     * Overrides [key] with [value] from now on, as if it had been in the original `provide` list
+     * all along — what [ScopeStore.inject] calls. Every existing [Dependencies] reference that
+     * already resolves through this instance (this scope's own `update()`, and any already-active
+     * child whose ancestor chain bottoms out here — see `CombinedDependencies` in `ScopeStore.kt`)
+     * sees the new value on its very next [resolve] call: nothing here is snapshotted, resolution
+     * always reads this map fresh.
+     */
+    internal fun <T> override(key: InjectionKey<T>, value: T) {
+        synchronized(provided) { provided[key] = value }
+    }
 
     @Suppress("UNCHECKED_CAST")
-    override fun <T> resolve(key: InjectionKey<T>): T =
+    override fun <T> resolve(key: InjectionKey<T>): T = synchronized(provided) {
         if (provided.containsKey(key)) provided[key] as T else key.defaultValue
+    }
 
     // A flat MapDependencies never has an ancestor of its own — [ScopeStoreImpl] is what wires
     // real SuperstateKey resolution when composing scopes (see ScopeStore.kt); reaching here at

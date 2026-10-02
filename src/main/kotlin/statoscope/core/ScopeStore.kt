@@ -61,6 +61,18 @@ interface ScopeStore<State, When> {
     fun send(action: When)
 
     /**
+     * Overrides [key] with [value] on this store, from now on — explicit injection after the
+     * store already exists, for whatever wasn't known yet at [createScope]/[ScopeConfig.provide]
+     * time (ports Swift Statoscope's `injectObject(_:)`, callable any time on a live scope, not
+     * just at construction). Already-active children aren't rebuilt or notified — nothing needs
+     * to be: their own [Dependencies] chain resolves through this store's live, mutable
+     * injection map on every call (see [MapDependencies.override]), so the very next `resolve(key)`
+     * anywhere in this store's subtree that doesn't already override [key] itself sees [value].
+     * Wins over this store's own [ScopeConfig.provide] entry for [key] too, if it had one.
+     */
+    fun <T> inject(key: InjectionKey<T>, value: T)
+
+    /**
      * Installs [middleware], intercepting every event this store sends to itself. Fluent —
      * returns this same store, mirroring Swift Statoscope's chainable `Store(...).addMiddleWare { ... }`.
      * Only one middleware is supported; a second call replaces the first — including the
@@ -202,8 +214,10 @@ private class ScopeStoreImpl<State, When>(
     inheritedDependencies: Dependencies?
 ) : ScopeStore<State, When> {
 
+    // Named, not inlined into `dependencies` below, so `inject()` has something to mutate.
+    private val ownInjection = MapDependencies(config.provide)
     private val dependencies: Dependencies = CombinedDependencies(
-        ownInjection = MapDependencies(config.provide),
+        ownInjection = ownInjection,
         ancestorFallback = inheritedDependencies ?: NoAncestorDependencies
     )
     private val logPrefix: String = scopeLogPrefix(config.initial, this)
@@ -274,6 +288,10 @@ private class ScopeStoreImpl<State, When>(
         found.value.job?.cancel()
         send(found.value.enqueued.completePristine(pristineResult) as When)
         return true
+    }
+
+    override fun <T> inject(key: InjectionKey<T>, value: T) {
+        ownInjection.override(key, value)
     }
 
     // Effects complete on effectScope's own thread (defaultEffectDispatcher's dedicated thread

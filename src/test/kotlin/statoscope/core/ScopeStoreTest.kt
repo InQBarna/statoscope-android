@@ -697,4 +697,38 @@ class ScopeStoreTest {
             "no ancestor at all exists here, so the key's own defaultValue must apply"
         )
     }
+
+    // MARK: - ScopeStore.inject (explicit injection after the store already exists)
+
+    @Test
+    fun testInjectOverridesAnInjectionKeyAfterTheStoreAlreadyExists() {
+        val orphan = createScope(ancestorGrandchildConfig)
+
+        orphan.inject(ancestorGreetingKey, "hello-from-inject")
+        orphan.send(AncestorGrandchildWhen.ReadGreeting)
+
+        assertEquals(
+            "hello-from-inject", orphan.state.greeting,
+            "inject() should win over the key's own defaultValue, same as a provide entry would"
+        )
+    }
+
+    @Test
+    fun testInjectOnAParentReachesAnAlreadyActiveChildWithNoRebuild() {
+        val root = createScope(ancestorRootConfig)
+        root.send(AncestorRootWhen.ActivateMiddle)
+        val middle = root.childStore(ancestorRootMiddleSubScope)!!
+        middle.send(AncestorMiddleWhen.ActivateGrandchild)
+        val grandchild = middle.childStore(ancestorMiddleGrandchildSubScope)!!
+
+        // The grandchild already exists, built before this call — proving inject() doesn't need
+        // a rebuild to reach it; resolution just reads the root's (now-mutated) map fresh.
+        root.inject(ancestorGreetingKey, "hello-from-inject")
+        grandchild.send(AncestorGrandchildWhen.ReadGreeting)
+
+        assertEquals(
+            "hello-from-inject", grandchild.state.greeting,
+            "an already-active grandchild should see a parent's inject() on its very next resolve"
+        )
+    }
 }
