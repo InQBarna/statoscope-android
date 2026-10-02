@@ -256,6 +256,28 @@ private class ScopeStoreImpl<State, When>(
     // SubScope.onChildAction's one-hop, compile-time-validated relay.
     private var parent: ScopeStoreImpl<*, *>? = null
 
+    // Activates any child already non-null in `config.initial` — covers a parent whose own
+    // update() populates a child's state with an already-non-null grandchild (or deeper) in one
+    // shot, rather than one level at a time across separate events the way every tutorial/
+    // example built so far does. syncSubScopes (below) only reacts to a null<->non-null
+    // TRANSITION observed during process(); nothing built this way was ever null first FROM
+    // THIS STORE'S OWN PERSPECTIVE, so without this, such a descendant's own ScopeStore would
+    // never be created — its state would say it exists, but childStore(...) would return null
+    // forever (confirmed by ScopeStoreTest.testCreatingAChildWithAnAlreadyNonNullGrandchildActivatesTheGrandchildToo
+    // before this fix). Ports Swift's recursive child-slot initialization at Store-creation time
+    // (Store.swift's _applyChildSlotsRecursively) — this runs for every ScopeStoreImpl, so a
+    // multi-level pre-populated hierarchy activates recursively for free: each activateChild
+    // call below constructs a new ScopeStoreImpl, which runs this same init block for ITS OWN
+    // subScopes in turn.
+    init {
+        config.subScopes.forEach { subScope -> activateIfAlreadyPresent(subScope) }
+    }
+
+    private fun <ChildState, ChildWhen> activateIfAlreadyPresent(subScope: SubScope<State, When, ChildState, ChildWhen>) {
+        val initialChild = subScope.get(config.initial) ?: return
+        activateChild(subScope, initialChild)
+    }
+
     override fun addMiddleware(middleware: Middleware<State, When>): ScopeStore<State, When> {
         this.middleware = middleware
         return this

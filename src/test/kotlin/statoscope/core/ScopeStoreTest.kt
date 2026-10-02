@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -414,6 +415,64 @@ private val stalenessRootConfig = ScopeConfig<StalenessRootState, StalenessRootW
         }
     },
     subScopes = listOf(stalenessRootMiddleSubScope)
+)
+
+// Verifies a scenario flagged by this session's test-parity audit against Swift's
+// `ReducerTests.testNewChildWithPrePopulatedGrandchildCreatesFullHierarchy`: a parent's single
+// update() call creates a child whose OWN initial state already has a non-null grandchild field
+// — never built one level at a time the way every existing tutorial/example does. Swift
+// recursively activates the whole pre-populated hierarchy at child-creation time
+// (`Store.swift`'s `_applyChildSlotsRecursively`). This fixture exists to find out whether
+// Kotlin's `syncSubScopes` (which only runs inside `process()`, triggered by `send()` — nothing
+// scans a freshly-constructed child's own initial state for already-non-null descendants) does
+// the same, or leaves the grandchild's own ScopeStore never created.
+private data class PrePopulatedGrandchildState(val value: String = "initial")
+private sealed interface PrePopulatedGrandchildWhen {
+    data object NoOp : PrePopulatedGrandchildWhen
+}
+private val prePopulatedGrandchildConfig = ScopeConfig<PrePopulatedGrandchildState, PrePopulatedGrandchildWhen>(
+    initial = PrePopulatedGrandchildState(),
+    update = { state, _, _, _ -> state }
+)
+
+private data class PrePopulatedMiddleState(val grandchild: PrePopulatedGrandchildState? = null)
+private sealed interface PrePopulatedMiddleWhen {
+    data object NoOp : PrePopulatedMiddleWhen
+}
+private val prePopulatedMiddleGrandchildSubScope =
+    SubScope<PrePopulatedMiddleState, PrePopulatedMiddleWhen, PrePopulatedGrandchildState, PrePopulatedGrandchildWhen>(
+        config = prePopulatedGrandchildConfig,
+        get = { it.grandchild },
+        set = { state, grandchild -> state.copy(grandchild = grandchild) }
+    )
+private val prePopulatedMiddleConfig = ScopeConfig<PrePopulatedMiddleState, PrePopulatedMiddleWhen>(
+    initial = PrePopulatedMiddleState(),
+    update = { state, _, _, _ -> state },
+    subScopes = listOf(prePopulatedMiddleGrandchildSubScope)
+)
+
+private data class PrePopulatedRootState(val middle: PrePopulatedMiddleState? = null)
+private sealed interface PrePopulatedRootWhen {
+    data object CreateMiddleWithGrandchildAlreadyPresent : PrePopulatedRootWhen
+}
+private val prePopulatedRootMiddleSubScope =
+    SubScope<PrePopulatedRootState, PrePopulatedRootWhen, PrePopulatedMiddleState, PrePopulatedMiddleWhen>(
+        config = prePopulatedMiddleConfig,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) }
+    )
+private val prePopulatedRootConfig = ScopeConfig<PrePopulatedRootState, PrePopulatedRootWhen>(
+    initial = PrePopulatedRootState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is PrePopulatedRootWhen.CreateMiddleWithGrandchildAlreadyPresent ->
+                // One single update() call, not two separate events — the middle AND its own
+                // grandchild both come into existence at once, exactly the scenario Swift's
+                // _applyChildSlotsRecursively exists to handle.
+                state.copy(middle = PrePopulatedMiddleState(grandchild = PrePopulatedGrandchildState(value = "pre-populated")))
+        }
+    },
+    subScopes = listOf(prePopulatedRootMiddleSubScope)
 )
 
 class ScopeStoreTest {
@@ -841,6 +900,29 @@ class ScopeStoreTest {
             error.message!!.contains("No ancestor provides"),
             "unlike InjectionKey, a SuperstateKey has no key-level default to fall back to — " +
                 "resolving one with nothing on the path declaring it is a programmer error"
+        )
+    }
+
+    // MARK: - Pre-populated grandchild at child-creation time (test-parity audit finding)
+
+    @Test
+    fun testCreatingAChildWithAnAlreadyNonNullGrandchildActivatesTheGrandchildToo() {
+        val root = createScope(prePopulatedRootConfig)
+        root.send(PrePopulatedRootWhen.CreateMiddleWithGrandchildAlreadyPresent)
+
+        val middle = root.childStore(prePopulatedRootMiddleSubScope)!!
+        assertEquals(
+            "pre-populated", middle.state.grandchild?.value,
+            "the middle's own state should already reflect the grandchild it was created with"
+        )
+
+        val grandchild = middle.childStore(prePopulatedMiddleGrandchildSubScope)
+        assertNotNull(
+            grandchild,
+            "a grandchild already present in the child's initial state (set in the SAME " +
+                "update() call that created the child, not a separate later event) should have " +
+                "its own real ScopeStore activated too — Swift does this recursively at " +
+                "child-creation time (Store.swift's _applyChildSlotsRecursively)"
         )
     }
 }
