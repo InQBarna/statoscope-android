@@ -184,6 +184,78 @@ private val effectConfig = ScopeConfig<TestState, TestWhen>(
     }
 )
 
+// Three real levels (Root -> Middle -> Grandchild), proving ScopeConfig.onDescendantAction
+// reaches a GRANDCHILD directly from the ROOT, with zero relay at the Middle level — the
+// runtime-broadcast counterpart to SubScope.onChildAction's one-hop, compile-time-validated
+// relay. Mirrors the shape (if not the exact mechanism) SubScopeProcessorTest proves for the
+// codegen path.
+private data class BroadcastGrandchildState(val tapped: Boolean = false)
+private sealed interface BroadcastGrandchildWhen {
+    data object Tap : BroadcastGrandchildWhen
+}
+private val broadcastGrandchildConfig = ScopeConfig<BroadcastGrandchildState, BroadcastGrandchildWhen>(
+    initial = BroadcastGrandchildState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is BroadcastGrandchildWhen.Tap -> state.copy(tapped = true)
+        }
+    }
+)
+
+private data class BroadcastMiddleState(val grandchild: BroadcastGrandchildState? = null)
+private sealed interface BroadcastMiddleWhen {
+    data object ActivateGrandchild : BroadcastMiddleWhen
+}
+
+// Deliberately NO onChildAction here — proving the root sees the grandchild's event with no
+// relay from this level at all, not even an unconditional pass-through one.
+private val broadcastMiddleGrandchildSubScope =
+    SubScope<BroadcastMiddleState, BroadcastMiddleWhen, BroadcastGrandchildState, BroadcastGrandchildWhen>(
+        config = broadcastGrandchildConfig,
+        get = { it.grandchild },
+        set = { state, grandchild -> state.copy(grandchild = grandchild) }
+    )
+
+private val broadcastMiddleConfig = ScopeConfig<BroadcastMiddleState, BroadcastMiddleWhen>(
+    initial = BroadcastMiddleState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is BroadcastMiddleWhen.ActivateGrandchild -> state.copy(grandchild = BroadcastGrandchildState())
+        }
+    },
+    subScopes = listOf(broadcastMiddleGrandchildSubScope)
+)
+
+private data class BroadcastRootState(
+    val middle: BroadcastMiddleState? = null,
+    val grandchildTapsSeenAtRoot: Int = 0
+)
+private sealed interface BroadcastRootWhen {
+    data object ActivateMiddle : BroadcastRootWhen
+    data object RecordGrandchildTap : BroadcastRootWhen
+}
+private val broadcastRootMiddleSubScope =
+    SubScope<BroadcastRootState, BroadcastRootWhen, BroadcastMiddleState, BroadcastMiddleWhen>(
+        config = broadcastMiddleConfig,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) }
+    )
+
+private val broadcastRootConfig = ScopeConfig<BroadcastRootState, BroadcastRootWhen>(
+    initial = BroadcastRootState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is BroadcastRootWhen.ActivateMiddle -> state.copy(middle = BroadcastMiddleState())
+            is BroadcastRootWhen.RecordGrandchildTap ->
+                state.copy(grandchildTapsSeenAtRoot = state.grandchildTapsSeenAtRoot + 1)
+        }
+    },
+    subScopes = listOf(broadcastRootMiddleSubScope),
+    onDescendantAction = { descendantWhen, _, _, _ ->
+        if (descendantWhen is BroadcastGrandchildWhen.Tap) BroadcastRootWhen.RecordGrandchildTap else null
+    }
+)
+
 class ScopeStoreTest {
 
     @Test
@@ -418,6 +490,60 @@ class ScopeStoreTest {
         assertEquals(
             "already running, skipped", store.state.marker,
             "effects.effects should have shown the still-ongoing CountingSlowEffect to this second call"
+        )
+    }
+
+    // MARK: - onDescendantAction (broadcast reach, Issue 7)
+
+    @Test
+    fun testOnDescendantActionReachesAGrandchildWithNoRelayAtTheMiddleLevel() {
+        val root = createScope(broadcastRootConfig)
+        root.send(BroadcastRootWhen.ActivateMiddle)
+        val middle = root.childStore(broadcastRootMiddleSubScope)!!
+        middle.send(BroadcastMiddleWhen.ActivateGrandchild)
+        val grandchild = middle.childStore(broadcastMiddleGrandchildSubScope)!!
+
+        grandchild.send(BroadcastGrandchildWhen.Tap)
+
+        assertTrue(grandchild.state.tapped, "the grandchild's own update() still ran normally")
+        assertEquals(
+            1, root.state.grandchildTapsSeenAtRoot,
+            "the root saw the grandchild's event directly, with no onChildAction relay anywhere " +
+                "on the middle level's SubScope"
+        )
+    }
+
+    @Test
+    fun testOnDescendantActionFiresExactlyOncePerDescendantEvent() {
+        val root = createScope(broadcastRootConfig)
+        root.send(BroadcastRootWhen.ActivateMiddle)
+        val middle = root.childStore(broadcastRootMiddleSubScope)!!
+        middle.send(BroadcastMiddleWhen.ActivateGrandchild)
+        val grandchild = middle.childStore(broadcastMiddleGrandchildSubScope)!!
+
+        grandchild.send(BroadcastGrandchildWhen.Tap)
+        grandchild.send(BroadcastGrandchildWhen.Tap)
+        grandchild.send(BroadcastGrandchildWhen.Tap)
+
+        assertEquals(
+            3, root.state.grandchildTapsSeenAtRoot,
+            "each descendant event should notify ancestors exactly once — not zero, not more than once"
+        )
+    }
+
+    @Test
+    fun testOnDescendantActionDoesNotFireForTheRootsOwnSelfSentEvents() {
+        val root = createScope(broadcastRootConfig)
+
+        // ActivateMiddle is the root's OWN event, sent to itself — not a descendant's. The walk
+        // starts at `parent`, not `this`, so this must never reach the root's own
+        // onDescendantAction (which only matches BroadcastGrandchildWhen.Tap anyway, but the
+        // real point is this is a *self*-sent event with no descendant involved at all).
+        root.send(BroadcastRootWhen.ActivateMiddle)
+
+        assertEquals(
+            0, root.state.grandchildTapsSeenAtRoot,
+            "a store's own self-sent event must never trigger its own onDescendantAction"
         )
     }
 }

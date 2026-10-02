@@ -228,6 +228,13 @@ private class ScopeStoreImpl<State, When>(
     // back is always safe — the same pattern MapDependencies uses for InjectionKey.
     private val activeChildren = HashMap<SubScope<*, *, *, *>, ScopeStore<*, *>>()
 
+    // Null for the root of a composed tree (or any plain, uncomposed createScope call); set once,
+    // in activateChild, when this store is created as someone's child. Walked by notifyAncestors
+    // to give every ancestor — not just the direct parent — a chance to react to this store's own
+    // events via its own config.onDescendantAction, the runtime-broadcast counterpart to
+    // SubScope.onChildAction's one-hop, compile-time-validated relay.
+    private var parent: ScopeStoreImpl<*, *>? = null
+
     override fun addMiddleware(middleware: Middleware<State, When>): ScopeStore<State, When> {
         this.middleware = middleware
         return this
@@ -306,6 +313,7 @@ private class ScopeStoreImpl<State, When>(
         }
         mutableStateFlow.value = newState
         syncSubScopes(previousState, newState)
+        notifyAncestors(action as Any, newState as Any)
 
         if (beforeDump != null) {
             val afterDump = describeObject(state)
@@ -353,6 +361,37 @@ private class ScopeStoreImpl<State, When>(
         runningEffects[id] = RunningEffect(enqueued = effect, pristine = pristineEffect, job = job)
     }
 
+    // Walks every ancestor above this store — not just the direct parent — giving each a chance
+    // to react to this store's own event via its own config.onDescendantAction. Called from
+    // process() right after this store's own state is committed, so every ancestor sees the
+    // *real* originating descendant's already-updated state directly (never a mirrored copy, and
+    // never through an intermediate level's own onChildAction relay) — exactly like Swift's
+    // event.child always being the genuine descendant, never a proxy. Starting at `parent` rather
+    // than `this` means a store's own self-sent event never triggers its own
+    // onDescendantAction — only a genuine descendant's does, matching Swift's
+    // `callParentEnclosedHierarchialUpdate` (the walk begins at the sender's parent, not the
+    // sender itself).
+    private fun notifyAncestors(descendantWhen: Any, descendantState: Any) {
+        var current = parent
+        while (current != null) {
+            current.reactToDescendant(descendantWhen, descendantState)
+            current = current.parent
+        }
+    }
+
+    // Invoked on `this` (an ancestor) by some descendant's notifyAncestors walk. A null
+    // onDescendantAction (the common case: this reducer doesn't react to anything beyond its own
+    // direct children, if that) is a no-op. A non-null result is sent through this ancestor's own
+    // send() — recursive, synchronous, and safe: send() synchronizes on `this`'s own lock, a
+    // different monitor than whichever descendant's process() is still running further down the
+    // call stack.
+    @Suppress("UNCHECKED_CAST")
+    private fun reactToDescendant(descendantWhen: Any, descendantState: Any) {
+        val handler = config.onDescendantAction ?: return
+        val delegated = handler(descendantWhen, descendantState, state, dependencies) ?: return
+        send(delegated as When)
+    }
+
     // Runs after every state update, once per declared SubScope — a null→non-null transition on
     // its field activates a new child, non-null→null tears the current one down. A field that
     // stays non-null across the transition is left alone: the child's own store is the one
@@ -392,6 +431,7 @@ private class ScopeStoreImpl<State, When>(
             effectScope,
             inheritedDependencies = superstateChain
         )
+        childStore.parent = this
 
         // The one hook a child needs: forward first (child-first, no interception — see
         // SubScope's doc), then mirror its now-updated state back into this field of our own

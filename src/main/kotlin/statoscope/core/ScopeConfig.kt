@@ -26,13 +26,40 @@ package statoscope.core
 typealias Reducer<State, When> = (state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies) -> State
 
 /**
+ * Reacts to an event from **any** descendant, at **any** depth — not just a direct [SubScope]
+ * child (that's [SubScope.onChildAction], typed per child and KSP-validated). Ports Swift
+ * Statoscope's `MiddlewareReducer.updateSubstate<Child: Reducer>` directly, generics included:
+ * Swift's `Child` type parameter (cast at the call site via `childWhen as? SomeReducer.When`)
+ * becomes [descendantWhen]/[descendantState] typed as `Any`, matched the same way inside the
+ * handler body (`descendantWhen is SomeReducer.When`) — Kotlin has no equivalent of a single
+ * generic function dispatched per concrete type at the call site, so runtime `is`/`as` checks are
+ * the direct, idiomatic port rather than a workaround.
+ *
+ * Runs *after* the descendant's own `update()` — [descendantState] is already that descendant's
+ * post-update state, exactly like Swift's `childState` parameter — so a reaction can safely read
+ * it, and even go on to destroy/replace that subtree, without racing a stale event still being
+ * delivered into it. [parentState] is this reducer's own current state, read-only — any reaction
+ * has to go through the returned `When?`, which lands in this reducer's own `update()`, the only
+ * place `State` changes. Return `null` for no reaction.
+ *
+ * See [SubScope.onChildAction] for the direct-child, compile-time-validated equivalent — reach
+ * for this only when a reducer needs to see further than one level down; the two mechanisms are
+ * independent and both can fire for the same event (see `ScopeStoreImpl.notifyAncestors`'s own
+ * doc for the exact ordering).
+ */
+typealias OnDescendantAction<State, When> =
+    (descendantWhen: Any, descendantState: Any, parentState: State, dependencies: Dependencies) -> When?
+
+/**
  * Configuration for a scope: its initial state, its [Reducer], any [InjectionKey] overrides for
- * that scope, and any [SubScope]s it composes with (Tutorial 05) — child scopes it creates,
- * mirrors, and tears down as fields of its own [State] go non-null/null.
+ * that scope, any [SubScope]s it composes with (Tutorial 05) — child scopes it creates, mirrors,
+ * and tears down as fields of its own [State] go non-null/null — and an optional
+ * [OnDescendantAction] for reacting to any descendant's event at any depth.
  */
 data class ScopeConfig<State, When>(
     val initial: State,
     val update: Reducer<State, When>,
     val provide: List<Pair<InjectionKey<*>, Any?>> = emptyList(),
-    val subScopes: List<SubScope<State, When, *, *>> = emptyList()
+    val subScopes: List<SubScope<State, When, *, *>> = emptyList(),
+    val onDescendantAction: OnDescendantAction<State, When>? = null
 )
