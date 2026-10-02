@@ -15,9 +15,11 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import statoscope.codegen.OnChildAction
 import statoscope.codegen.Reducer
+import statoscope.codegen.ReducerInjected
 import statoscope.codegen.SubState
 import statoscope.core.Dependencies
 import statoscope.core.EffectsState
+import statoscope.core.InjectionKey
 import statoscope.core.createScope
 
 @Reducer
@@ -95,6 +97,27 @@ object TestFeedReducer {
         }
 }
 
+val TestLoggerKey = InjectionKey("default-logger", "TestLogger")
+
+@Reducer
+object TestInjectedReducer {
+    data class State(
+        @ReducerInjected("TestLoggerKey") val logger: String = TestLoggerKey.defaultValue,
+        val count: Int = 0
+    )
+
+    sealed interface When {
+        data object Increment : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            // Deliberately never touches `logger` itself — proving the generated wrapper
+            // re-stamps it after EVERY update(), regardless of which event fired.
+            is When.Increment -> state.copy(count = state.count + 1)
+        }
+}
+
 class SubScopeProcessorTest {
 
     @Test
@@ -125,5 +148,26 @@ class SubScopeProcessorTest {
         // No favorite tap sent — favorites must stay empty, proving the previous test's green
         // result isn't a false positive from some other path populating it.
         assertEquals(emptyList(), store.state.favorites)
+    }
+
+    // MARK: - @ReducerInjected
+
+    @Test
+    fun testReducerInjectedStartsWithTheKeysOwnDefaultBeforeAnyUpdate() {
+        val store = createScope(TestInjectedReducer.config)
+        assertEquals("default-logger", store.state.logger)
+    }
+
+    @Test
+    fun testReducerInjectedIsReStampedFromDependenciesAfterEveryUpdate() {
+        val store = createScope(TestInjectedReducer.config)
+        store.inject(TestLoggerKey, "injected-logger")
+
+        // Increment never touches `logger` in TestInjectedReducer's own update() — the
+        // generated wrapper is what re-stamps it, for every event, not just ones that mention it.
+        store.send(TestInjectedReducer.When.Increment)
+
+        assertEquals("injected-logger", store.state.logger)
+        assertEquals(1, store.state.count)
     }
 }

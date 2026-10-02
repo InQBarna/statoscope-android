@@ -118,3 +118,31 @@ target of eventual broadcast reach on both platforms, not yet designed for Kotli
   real, new requirement this imposes: the generated `config`'s own `initial` needs *some* value,
   even though (same as `SubScope.config`'s own doc already says for the hand-written path) it's
   only ever a placeholder for anything actually reached as a child.
+
+## `@ReducerInjected` (2026-10-02) — ambient `State`-level injection, string-named
+
+The codegen stand-in for Swift's `@ReducerInjected(RealLogger.self)` — see that annotation's own
+doc for the full picture. Ports the *feature* (`state.someProperty` instead of
+`dependencies.resolve(key)`), not the exact syntax: Kotlin annotations can only carry
+compile-time constants, never a reference to an arbitrary `val`, so `@ReducerInjected(LoggerKey)`
+(mirroring Swift's type reference) isn't expressible — `@ReducerInjected("LoggerKey")`, the key's
+*name* as a string, is the only way to point an annotation at one. `:codegen-processor` doesn't
+validate that the name resolves to a real `InjectionKey<T>` with a matching `T` — unlike
+`@SubState`/`@OnChildAction`'s full symbol-level checks, a wrong name surfaces as a real compile
+error one level removed, in the generated file itself, not pointing at the annotation. Accepted
+for now; recoverable later by having the processor resolve the name itself via KSP's `Resolver`
+and report the error at the right place, same as everything else this codegen validates.
+
+Mechanically: any `@ReducerInjected` property makes the generated `update` a wrapping lambda
+(`{ state, action, effects, dependencies -> Reducer.update(...).copy(prop = dependencies.resolve(Key)) }`)
+instead of the plain `Reducer::update` function reference used when there are none — re-stamping
+every annotated property from `dependencies` after every single `update()` call, regardless of
+which event fired. Because the property is still a real, ordinary `data class` field (with its
+own real default, `= LoggerKey.defaultValue`), `equals()`/`copy()` need no lens-based workaround
+the way `@SubState`'s live child slots would have. The trade-off, not a bug: this is "fresh as of
+the last `update()`," not continuously live on every read the way Swift's computed `store.state`
+getter re-injects on every access — an `inject()`/`provide` change between two events isn't
+reflected in an already-materialized `State` until the next `update()` runs. Proven end to end in
+`SubScopeProcessorTest` (`TestInjectedReducer`): the state holds the key's own default before any
+event, and a real `inject()`'d override after sending one — even one that never touches the
+annotated property itself.

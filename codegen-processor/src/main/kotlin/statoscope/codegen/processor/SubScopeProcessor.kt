@@ -51,6 +51,8 @@ class SubScopeProcessor(
 
     private data class ChildSlot(val propertyName: String, val childReducer: ReducerInfo)
 
+    private data class ReducerInjectedSlot(val propertyName: String, val keyName: String)
+
     override fun process(resolver: Resolver): List<KSAnnotated> {
         val reducerObjects = resolver.getSymbolsWithAnnotation("statoscope.codegen.Reducer")
             .filterIsInstance<KSClassDeclaration>()
@@ -110,6 +112,7 @@ class SubScopeProcessor(
             .toList()
 
         val onChildActionsByChildStateFqName = resolveOnChildActions(reducer, byStateFqName)
+        val reducerInjectedSlots = resolveReducerInjectedSlots(reducer)
 
         // Each SubScope is its own stable, eagerly-initialized top-level `val` — NOT built
         // inline inside subScopes' listOf(...) — because ScopeStore.childStore(subScope) looks
@@ -146,6 +149,21 @@ class SubScopeProcessor(
             "listOf(${slots.joinToString(", ") { subScopeValNames.getValue(it) }})"
         }
 
+        // No @ReducerInjected properties: keep the plain function reference, unchanged from
+        // before this feature existed. With at least one, wrap it in a lambda that re-stamps
+        // each one from `dependencies` right after the user's own update() returns — see
+        // ReducerInjected's own doc for why this is "fresh as of the last update()," not
+        // continuously live on every read.
+        val updateBody = if (reducerInjectedSlots.isEmpty()) {
+            "$reducerName::update"
+        } else {
+            val copyArgs = reducerInjectedSlots.joinToString(", ") { slot ->
+                "${slot.propertyName} = dependencies.resolve(${slot.keyName})"
+            }
+            "{ state, action, effects, dependencies -> " +
+                "$reducerName.update(state, action, effects, dependencies).copy($copyArgs) }"
+        }
+
         val file = codeGenerator.createNewFile(
             dependencies = Dependencies(aggregating = true, *reducerObjectsFiles(reducer, slots)),
             packageName = packageName,
@@ -166,7 +184,7 @@ class SubScopeProcessor(
                 |val $reducerName.config: ScopeConfig<$stateName, $whenName>
                 |    get() = ScopeConfig(
                 |        initial = $stateName(),
-                |        update = $reducerName::update,
+                |        update = $updateBody,
                 |        subScopes = $subScopesBody
                 |    )
                 |
@@ -174,6 +192,34 @@ class SubScopeProcessor(
             )
         }
     }
+
+    /**
+     * `name` is only validated as "present and a String" here — not that it actually names a
+     * real top-level `InjectionKey<T>` with a matching `T`, unlike [resolveSlot]/
+     * [resolveOnChildActions]'s full symbol-level checks. A wrong name surfaces as a real
+     * compile error, just one level removed: the generated file itself fails to compile
+     * (`unresolved reference`, or a type mismatch on the generated `.copy(...)` call) rather
+     * than KSP reporting it here, pointing at this property. Known, accepted trade-off — see
+     * [ReducerInjected]'s own doc.
+     */
+    private fun resolveReducerInjectedSlots(reducer: ReducerInfo): List<ReducerInjectedSlot> =
+        reducer.stateClass.getDeclaredProperties()
+            .mapNotNull { property ->
+                val annotation = property.annotations
+                    .find { it.shortName.asString() == "ReducerInjected" }
+                    ?: return@mapNotNull null
+                val keyName = annotation.arguments.find { it.name?.asString() == "name" }?.value as? String
+                if (keyName.isNullOrBlank()) {
+                    logger.error(
+                        "@ReducerInjected on '${property.simpleName.asString()}' needs a non-blank name: String " +
+                            "naming a top-level InjectionKey val in the same file",
+                        property
+                    )
+                    return@mapNotNull null
+                }
+                ReducerInjectedSlot(propertyName = property.simpleName.asString(), keyName = keyName)
+            }
+            .toList()
 
     private fun resolveSlot(property: KSPropertyDeclaration, byStateFqName: Map<String, ReducerInfo>): ChildSlot? {
         val propertyType = property.type.resolve()
