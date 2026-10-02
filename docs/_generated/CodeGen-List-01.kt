@@ -1,10 +1,13 @@
 /**
- * The middle level. `@SubState val selectedArticle` replaces `newsFeedArticleSubScope`'s entire
- * hand-written `get`/`set`/`config` lens — `:codegen-processor` resolves `NewsFeedArticleReducer`
- * by matching this property's type, and generates the lens itself.
+ * The middle level — both a child (of the root, below) and a parent (of the article, above) at
+ * once. `@SubState val selectedArticle` declares that parent relationship directly as a
+ * property: `:codegen-processor` finds `NewsFeedArticleReducer` as the matching child type and
+ * generates the create/mirror/tear-down wiring for it.
  *
- * `MAX_FAVORITES` is enforced here now (see `NewsFeedArticleReducer`'s doc above for why) — this
- * level already owns `favorites`, so checking its own size needs no live ancestor read at all.
+ * Favoriting is enforced here, not in the article, because this is the level that actually owns
+ * `favorites` — deciding whether there's room for one more needs nothing beyond this reducer's
+ * own state. See the note on `SuperstateKey` below `onArticleFavorited` for the general case this
+ * example doesn't need.
  */
 @Reducer
 object NewsFeedListReducer {
@@ -46,9 +49,14 @@ object NewsFeedListReducer {
 
     /**
      * Matched to `selectedArticle` by type, not by name — this function could be called anything.
-     * Compare against `newsFeedArticleSubScope`'s `onChildAction` lambda in Tutorial 05: same
-     * decision, now a real, independently-named, independently-testable function instead of a
-     * closure embedded in a `SubScope(...)` call.
+     *
+     * A reducer that needs to read an ancestor's state *live*, rather than just react to a
+     * child's events, reaches for `SuperstateKey` + `dependencies.resolve(key)` instead (see
+     * Tutorial 05): a descendant declares a key, an ancestor's `SubScope` wires itself up to
+     * answer it, and anything below resolves it fresh on every call. `@SubState` doesn't yet
+     * generate that wiring on its own — there's no annotation-only way to attach a
+     * `superstateKey` to a generated child relationship today, so a composition that genuinely
+     * needs one still uses the hand-written `SubScope(...)` form for that relationship.
      */
     @OnChildAction
     fun onArticleFavorited(

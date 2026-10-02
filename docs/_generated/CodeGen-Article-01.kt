@@ -4,16 +4,11 @@ import statoscope.codegen.SubState
 import statoscope.core.Dependencies
 import statoscope.core.EffectsState
 /**
- * The leaf, as a `@Reducer` object. Compare against `NewsFeedArticleState`/`NewsFeedArticleWhen`/
- * `newsFeedArticleUpdate` in Tutorial 05 — same shape, no `ScopeConfig(...)` to build by hand.
- *
- * One real difference from Tutorial 05's version, not an oversight: that version's
- * `UserTappedFavoriteButton` branch reads `NewsFeedListSuperstateKey` live to decide
- * `favoritesLimitReached` *before* reporting the tap upward. `superstateKey` isn't auto-wired by
- * `@SubState` — deliberately, see `@Reducer`'s own doc — so there's no annotation-only way to
- * attach one to a generated `SubScope` today. This version moves the limit check to
- * `NewsFeedListReducer.onArticleFavorited` below instead, which already has `parentState.favorites`
- * in scope without needing to read anything live at all.
+ * The leaf, as a `@Reducer` object. Two kinds of event live here, handled completely
+ * differently: toggling expanded is purely local — nothing outside this one article cares
+ * whether its body is shown. Tapping favorite only *reports* the tap; whether it's actually
+ * allowed is a decision that belongs to whichever level owns the data needed to make it — see
+ * `NewsFeedListReducer` below.
  */
 @Reducer
 object NewsFeedArticleReducer {

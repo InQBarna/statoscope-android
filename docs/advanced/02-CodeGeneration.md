@@ -6,26 +6,19 @@
 > 01's own header note for what that guarantees and what it doesn't (manual re-sync after a
 > source change).
 >
-> This article rebuilds Tutorial 05's own news-feed example — the same `Article`/`Favorite` types,
-> the same three levels, the same "favoriting an article reaches the list two levels up" proof —
-> using `@Reducer`/`@SubState`/`@OnChildAction` from `:codegen` (processed by
-> `:codegen-processor`) instead of hand-written `ScopeConfig(...)`/`SubScope(...)`. The point
-> isn't new behavior; it's the same behavior with a fraction of the plumbing, so you can compare
-> the two side by side rather than take "it's shorter" on faith. See `CODEGEN.md` at the repo root
-> for the full design writeup.
->
-> One real difference, not an oversight: Tutorial 05's version reads a live `SuperstateKey` inside
-> the article to decide a favorites limit before reporting a tap upward. `superstateKey` isn't
-> auto-wired by `@SubState` — deliberately, see `@Reducer`'s own doc comment for why — so there's
-> no annotation-only way to attach one to a generated `SubScope` yet. This version moves the limit
-> check to the list's own `@OnChildAction`, which already has the data it needs without reading
-> anything live at all.
+> **Following Tutorial 05 (Scopes)**: this article builds the exact same news-feed domain — the
+> same `Article`/`Favorite` types, the same three-level composition (Article → List → Root) — but
+> with `@Reducer`/`@SubState`/`@OnChildAction` from `:codegen` instead of hand-written
+> `ScopeConfig(...)`/`SubScope(...)`. Read Tutorial 05 first if you haven't; this one assumes its
+> domain and composition concepts, and spends its own words on what's different about building
+> the same tree this way. See `CODEGEN.md` at the repo root for the full design writeup.
 
 ## The leaf
 
-Compare this against `NewsFeedArticleState`/`NewsFeedArticleWhen`/`newsFeedArticleUpdate` in
-Tutorial 05 — same shape, no `ScopeConfig(...)` built by hand, and the whole thing is a plain
-`object` instead of three separate top-level declarations plus a free function.
+`NewsFeedArticleReducer` handles two kinds of event completely differently: toggling expanded is
+purely local — nothing outside this one article cares whether its body is shown. Tapping favorite
+only *reports* the tap; whether it's actually allowed is a decision that belongs to whichever
+level owns the data needed to make it, not to the article itself.
 
 ```kotlin
 import statoscope.codegen.OnChildAction
@@ -34,16 +27,11 @@ import statoscope.codegen.SubState
 import statoscope.core.Dependencies
 import statoscope.core.EffectsState
 /**
- * The leaf, as a `@Reducer` object. Compare against `NewsFeedArticleState`/`NewsFeedArticleWhen`/
- * `newsFeedArticleUpdate` in Tutorial 05 — same shape, no `ScopeConfig(...)` to build by hand.
- *
- * One real difference from Tutorial 05's version, not an oversight: that version's
- * `UserTappedFavoriteButton` branch reads `NewsFeedListSuperstateKey` live to decide
- * `favoritesLimitReached` *before* reporting the tap upward. `superstateKey` isn't auto-wired by
- * `@SubState` — deliberately, see `@Reducer`'s own doc — so there's no annotation-only way to
- * attach one to a generated `SubScope` today. This version moves the limit check to
- * `NewsFeedListReducer.onArticleFavorited` below instead, which already has `parentState.favorites`
- * in scope without needing to read anything live at all.
+ * The leaf, as a `@Reducer` object. Two kinds of event live here, handled completely
+ * differently: toggling expanded is purely local — nothing outside this one article cares
+ * whether its body is shown. Tapping favorite only *reports* the tap; whether it's actually
+ * allowed is a decision that belongs to whichever level owns the data needed to make it — see
+ * `NewsFeedListReducer` below.
  */
 @Reducer
 object NewsFeedArticleReducer {
@@ -70,21 +58,29 @@ object NewsFeedArticleReducer {
 
 ## The middle level
 
-`@SubState val selectedArticle` replaces Tutorial 05's entire hand-written `get`/`set`/`config`
-lens (`newsFeedArticleSubScope`, eleven lines) — `:codegen-processor` resolves
-`NewsFeedArticleReducer` by matching this property's type against every other `@Reducer` object's
-`State`, and generates the lens itself. `@OnChildAction` replaces the `onChildAction` closure that
-used to live embedded inside that same `SubScope(...)` call — now a real, independently-named,
-independently-testable function, matched to `selectedArticle` by type, not by name.
+`NewsFeedListReducer` is both a child (of the root, below) and a parent (of the article, above)
+at once. `@SubState val selectedArticle` declares that parent relationship directly as a
+property: `:codegen-processor` finds `NewsFeedArticleReducer` as the matching child type and
+generates the create/mirror/tear-down wiring for it — the thing a hand-written `SubScope(...)`'s
+`get`/`set`/`config` lens would otherwise spell out by hand.
+
+Favoriting is enforced here, not in the article, because this is the level that actually owns
+`favorites` — deciding whether there's room for one more needs nothing beyond this reducer's own
+state. `@OnChildAction` is how this level reacts to something that happened in the article,
+matched to `selectedArticle` by *type*, not by name, so a wrong shape is a compile error rather
+than a silent no-op.
 
 ```kotlin
 /**
- * The middle level. `@SubState val selectedArticle` replaces `newsFeedArticleSubScope`'s entire
- * hand-written `get`/`set`/`config` lens — `:codegen-processor` resolves `NewsFeedArticleReducer`
- * by matching this property's type, and generates the lens itself.
+ * The middle level — both a child (of the root, below) and a parent (of the article, above) at
+ * once. `@SubState val selectedArticle` declares that parent relationship directly as a
+ * property: `:codegen-processor` finds `NewsFeedArticleReducer` as the matching child type and
+ * generates the create/mirror/tear-down wiring for it.
  *
- * `MAX_FAVORITES` is enforced here now (see `NewsFeedArticleReducer`'s doc above for why) — this
- * level already owns `favorites`, so checking its own size needs no live ancestor read at all.
+ * Favoriting is enforced here, not in the article, because this is the level that actually owns
+ * `favorites` — deciding whether there's room for one more needs nothing beyond this reducer's
+ * own state. See the note on `SuperstateKey` below `onArticleFavorited` for the general case this
+ * example doesn't need.
  */
 @Reducer
 object NewsFeedListReducer {
@@ -126,9 +122,14 @@ object NewsFeedListReducer {
 
     /**
      * Matched to `selectedArticle` by type, not by name — this function could be called anything.
-     * Compare against `newsFeedArticleSubScope`'s `onChildAction` lambda in Tutorial 05: same
-     * decision, now a real, independently-named, independently-testable function instead of a
-     * closure embedded in a `SubScope(...)` call.
+     *
+     * A reducer that needs to read an ancestor's state *live*, rather than just react to a
+     * child's events, reaches for `SuperstateKey` + `dependencies.resolve(key)` instead (see
+     * Tutorial 05): a descendant declares a key, an ancestor's `SubScope` wires itself up to
+     * answer it, and anything below resolves it fresh on every call. `@SubState` doesn't yet
+     * generate that wiring on its own — there's no annotation-only way to attach a
+     * `superstateKey` to a generated child relationship today, so a composition that genuinely
+     * needs one still uses the hand-written `SubScope(...)` form for that relationship.
      */
     @OnChildAction
     fun onArticleFavorited(
@@ -144,15 +145,32 @@ object NewsFeedListReducer {
 }
 ```
 
+### Reading an ancestor's live state
+
+Some decisions genuinely need to know what an ancestor currently holds — not a value copied once
+at creation, but live, right now. `SuperstateKey` plus `dependencies.resolve(key)` (Tutorial 05)
+is how a reducer reads that: a descendant declares a key, an ancestor's `SubScope` wires itself up
+to answer it, and anything below resolves it fresh on every call. It exists so a leaf doesn't
+have to duplicate data that's naturally owned several levels up.
+
+This example never needs one: the favorites limit is a question the list can already answer using
+data it owns outright (`favorites.size`), so the article never has to ask an ancestor anything.
+That's the right design in general, not just a convenience here — reach for a live ancestor read
+only when the data genuinely lives elsewhere, not reflexively.
+
+Worth knowing either way: `@SubState` has no annotation-only way to attach a `superstateKey` to
+the child relationship it generates. A composition that does need a descendant to read an
+ancestor live still builds that one relationship with the hand-written `SubScope(...)` form.
+
 ## The root
 
-No `@OnChildAction` here at all — composition doesn't require one; only declare it when there's
-an actual reaction to make, exactly like Tutorial 05's root having no `onChildAction` either.
+No `@OnChildAction` here — composition doesn't require one; only declare it when there's an
+actual reaction to make.
 
 ```kotlin
 /**
  * The root. No `@OnChildAction` at all — composition doesn't require one; only declare it when
- * there's an actual reaction to make, exactly like Tutorial 05's root having no `onChildAction`.
+ * there's an actual reaction to make.
  */
 @Reducer
 object NewsFeedReducer {
@@ -189,11 +207,10 @@ is generated; so is a stable top-level `newsFeedReducerListSubScope` and
 `newsFeedListReducerSelectedArticleSubScope` (named `<reducer><property>SubScope`), should you
 ever need to reach a child directly the way the test below does.
 
-## Proving it's the same behavior
+## Proving it works
 
-The exact same proof as Tutorial 05's `ScopesIntegrationTest` — favoriting an article reaches the
-list two levels up with no relay code written in any reducer — now against generated `.config`
-properties instead of hand-written ones, plus a second test for the limit-check that moved.
+Favoriting an article reaches the list two levels up with no relay code written in any reducer —
+proven here against the real, generated `.config`, not a hand-built one.
 
 ```kotlin
 import kotlin.test.Test
@@ -202,9 +219,8 @@ import statoscope.core.createScope
 import statoscope.examples.tutorial05.Article
 import statoscope.examples.tutorial05.Favorite
 /**
- * The exact same proof as Tutorial 05's `ScopesIntegrationTest`, against generated `.config`
- * properties instead of hand-written `ScopeConfig(...)`/`SubScope(...)` — favoriting an article
- * reaches the list two levels up with no relay code written in any reducer.
+ * Favoriting an article reaches the list two levels up with no relay code written in any
+ * reducer — proven here against the real, generated `.config`, not a hand-built one.
  */
 class CodeGenerationIntegrationTest {
 
@@ -238,17 +254,17 @@ class CodeGenerationIntegrationTest {
 }
 ```
 
-## Also available, not shown above
+## Also available
 
-- **`@SubState`'s own validation**: a property it's applied to must be a class type owned by some
-  *other* `@Reducer` object as its `State` — a real KSP compile error, pointing at the property,
-  for a wrong type, a `List<T>`, or a type alias resolving to one.
+- **`@SubState`'s own validation**: the property it's applied to must be a class type owned by
+  some *other* `@Reducer` object as its `State` — a real KSP compile error, pointing at the
+  property, for a wrong type, a `List<T>`, or a type alias resolving to one.
 - **`@OnChildAction`'s own validation**: a real compile error, pointing at the function, for a
   wrong shape (parameter count/types/order, return type), a `childState` type with no matching
   `@SubState` property anywhere on the reducer, or two `@OnChildAction` functions both claiming
   the same child type.
 - **Multi-level reach today is still one hop plus relay**, same as the hand-written path — an
   intermediate reducer's own `@OnChildAction` has to relay a child's event unchanged, wrapped in
-  its own `When`, for a grandparent to react to it. See `PARITY_AUDIT.md`'s Issue 7 for the
-  broadcast-reaching alternative (`ScopeConfig.onDescendantAction`), which has no codegen
-  annotation yet — it's wired by hand on whichever reducer needs it.
+  its own `When`, for a grandparent to react to it directly. `ScopeConfig.onDescendantAction` is
+  the broadcast-reaching alternative (`PARITY_AUDIT.md`'s Issue 7); it has no codegen annotation
+  yet, so it's wired by hand on whichever reducer needs it.

@@ -1,6 +1,6 @@
 /**
  * The root. No `@OnChildAction` at all — composition doesn't require one; only declare it when
- * there's an actual reaction to make, exactly like Tutorial 05's root having no `onChildAction`.
+ * there's an actual reaction to make.
  */
 @Reducer
 object NewsFeedReducer {

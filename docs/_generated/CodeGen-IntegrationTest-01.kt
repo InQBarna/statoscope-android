@@ -4,9 +4,8 @@ import statoscope.core.createScope
 import statoscope.examples.tutorial05.Article
 import statoscope.examples.tutorial05.Favorite
 /**
- * The exact same proof as Tutorial 05's `ScopesIntegrationTest`, against generated `.config`
- * properties instead of hand-written `ScopeConfig(...)`/`SubScope(...)` — favoriting an article
- * reaches the list two levels up with no relay code written in any reducer.
+ * Favoriting an article reaches the list two levels up with no relay code written in any
+ * reducer — proven here against the real, generated `.config`, not a hand-built one.
  */
 class CodeGenerationIntegrationTest {
 
