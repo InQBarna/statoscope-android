@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -340,6 +341,79 @@ private val ancestorRootConfigWithMiddleOverride = ScopeConfig(
     update = ancestorRootUpdate,
     subScopes = listOf(ancestorRootMiddleWithOverrideSubScope),
     provide = listOf(ancestorGreetingKey.pair("hello-from-root"))
+)
+
+// Three real levels (Root -> Middle -> Leaf), the Leaf skipping its direct parent to read the
+// Root's own state live via SuperstateKey — ports Swift's `SkipLevelSuperStateStalenessTests`
+// (`Tests/StatoscopeTests/MiddlewareReducerTests.swift`, Audit Issue #6, fixed there
+// 2026-09-18). Swift's bug was reading a STALE cached mirror (`_rawState`) instead of the
+// ancestor's always-current computed `state`; Kotlin only ever has one representation per store
+// (`mutableStateFlow.value`), kept synchronously current by every child's own send() mirroring
+// up into its parent before returning (see `activateChild`'s middleware) — structurally immune
+// to this bug class, not just fixed after the fact. Same scenario, same assertion, as a
+// regression test rather than a theoretical claim.
+private val stalenessRootSuperstateKey = SuperstateKey<StalenessRootState>("StalenessRoot")
+
+private data class StalenessLeafState(val observedMiddleLabel: String? = null)
+private sealed interface StalenessLeafWhen {
+    data object ReadRootsMiddleLabel : StalenessLeafWhen
+}
+private val stalenessLeafConfig = ScopeConfig<StalenessLeafState, StalenessLeafWhen>(
+    initial = StalenessLeafState(),
+    update = { state, action, _, dependencies ->
+        when (action) {
+            is StalenessLeafWhen.ReadRootsMiddleLabel -> {
+                val root = dependencies.resolve(stalenessRootSuperstateKey)
+                state.copy(observedMiddleLabel = root.middle?.label)
+            }
+        }
+    }
+)
+
+private data class StalenessMiddleState(val label: String = "initial", val leaf: StalenessLeafState? = null)
+private sealed interface StalenessMiddleWhen {
+    data object CreateLeaf : StalenessMiddleWhen
+    data class SetLabel(val label: String) : StalenessMiddleWhen
+}
+// Deliberately no superstateKey on THIS SubScope — the leaf skips straight to the root's own
+// key, inherited unchanged through this level, with zero plumbing here, exactly like Swift's
+// skip-level @SuperState.
+private val stalenessMiddleLeafSubScope =
+    SubScope<StalenessMiddleState, StalenessMiddleWhen, StalenessLeafState, StalenessLeafWhen>(
+        config = stalenessLeafConfig,
+        get = { it.leaf },
+        set = { state, leaf -> state.copy(leaf = leaf) }
+    )
+private val stalenessMiddleConfig = ScopeConfig<StalenessMiddleState, StalenessMiddleWhen>(
+    initial = StalenessMiddleState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is StalenessMiddleWhen.CreateLeaf -> state.copy(leaf = StalenessLeafState())
+            is StalenessMiddleWhen.SetLabel -> state.copy(label = action.label)
+        }
+    },
+    subScopes = listOf(stalenessMiddleLeafSubScope)
+)
+
+private data class StalenessRootState(val middle: StalenessMiddleState? = null)
+private sealed interface StalenessRootWhen {
+    data object CreateMiddle : StalenessRootWhen
+}
+private val stalenessRootMiddleSubScope =
+    SubScope<StalenessRootState, StalenessRootWhen, StalenessMiddleState, StalenessMiddleWhen>(
+        config = stalenessMiddleConfig,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) },
+        superstateKey = stalenessRootSuperstateKey
+    )
+private val stalenessRootConfig = ScopeConfig<StalenessRootState, StalenessRootWhen>(
+    initial = StalenessRootState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is StalenessRootWhen.CreateMiddle -> state.copy(middle = StalenessMiddleState())
+        }
+    },
+    subScopes = listOf(stalenessRootMiddleSubScope)
 )
 
 class ScopeStoreTest {
@@ -729,6 +803,44 @@ class ScopeStoreTest {
         assertEquals(
             "hello-from-inject", grandchild.state.greeting,
             "an already-active grandchild should see a parent's inject() on its very next resolve"
+        )
+    }
+
+    // MARK: - SuperstateKey (ancestor-tree live read)
+
+    @Test
+    fun testSuperstateKeySkipLevelReflectsLiveMiddleStateNotStaleRootMirror() {
+        val root = createScope(stalenessRootConfig)
+        root.send(StalenessRootWhen.CreateMiddle)
+        val middle = root.childStore(stalenessRootMiddleSubScope)!!
+        middle.send(StalenessMiddleWhen.CreateLeaf)
+        val leaf = middle.childStore(stalenessMiddleLeafSubScope)!!
+
+        // Mutate middle directly — root never reprocesses an event of its own because of this,
+        // so if anything cached a mirror of middle at root-activation time, it would be stale here.
+        middle.send(StalenessMiddleWhen.SetLabel("updated"))
+
+        leaf.send(StalenessLeafWhen.ReadRootsMiddleLabel)
+
+        assertEquals(
+            "updated", leaf.state.observedMiddleLabel,
+            "the leaf's skip-level read of the root must see middle's CURRENT label, not " +
+                "whatever the root's own mirror of it held before middle was mutated directly"
+        )
+    }
+
+    @OptIn(StatoscopeInternalApi::class)
+    @Test
+    fun testSuperstateKeyWithNoAncestorErrorsRatherThanFallingBackToADefault() {
+        val dependencies = MapDependencies(emptyList<Pair<InjectionKey<*>, Any?>>())
+
+        val error = assertFailsWith<IllegalStateException> {
+            dependencies.resolve(stalenessRootSuperstateKey)
+        }
+        assertTrue(
+            error.message!!.contains("No ancestor provides"),
+            "unlike InjectionKey, a SuperstateKey has no key-level default to fall back to — " +
+                "resolving one with nothing on the path declaring it is a programmer error"
         )
     }
 }

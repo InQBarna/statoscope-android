@@ -13,6 +13,7 @@ import kotlin.test.assertTrue
 import statoscope.core.Effect
 import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
+import statoscope.core.SuperstateKey
 import statoscope.core.map
 
 private data class CounterState(val count: Int = 0)
@@ -64,6 +65,21 @@ private val networkConfig = ScopeConfig<NetworkState, NetworkWhen>(
                 state.copy(loading = true)
             }
             is NetworkWhen.Loaded -> state.copy(loading = false, value = action.value)
+        }
+    }
+)
+
+private val greetingSuperstateKey = SuperstateKey<String>("Greeting")
+
+private data class GreetingState(val greeting: String = "")
+private sealed interface GreetingWhen {
+    data object ReadGreeting : GreetingWhen
+}
+private val greetingConfig = ScopeConfig<GreetingState, GreetingWhen>(
+    initial = GreetingState(),
+    update = { state, action, _, dependencies ->
+        when (action) {
+            is GreetingWhen.ReadGreeting -> state.copy(greeting = dependencies.resolve(greetingSuperstateKey))
         }
     }
 )
@@ -136,5 +152,26 @@ class TestPlanTest {
     fun testOnEffectCompletesFailsClearlyWhenNoMatchingEffectIsPending() {
         val plan = given(networkConfig).onEffectCompletes(RawNetworkFetch::class, 42)
         assertFailsWith<IllegalStateException> { plan.runTest() }
+    }
+
+    // MARK: - withSuperstate (standing in for a SuperstateKey's missing real ancestor)
+
+    @Test
+    fun testWithSuperstateSuppliesAFakeAncestorValueForIsolatedTesting() {
+        given(greetingConfig)
+            .withSuperstate(greetingSuperstateKey, "hello-from-fake")
+            .on(GreetingWhen.ReadGreeting)
+            .thenEquals(GreetingState::greeting, "hello-from-fake")
+            .runTest()
+    }
+
+    @Test
+    fun testResolvingASuperstateKeyWithoutWithSuperstateFailsWithAHelpfulMessage() {
+        val plan = given(greetingConfig).on(GreetingWhen.ReadGreeting)
+        val error = assertFailsWith<IllegalStateException> { plan.runTest() }
+        assertTrue(
+            error.message!!.contains("withSuperstate"),
+            "the error should point the tester at withSuperstate(key, value), not just fail blankly"
+        )
     }
 }
