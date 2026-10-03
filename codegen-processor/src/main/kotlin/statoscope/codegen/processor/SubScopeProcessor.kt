@@ -205,24 +205,33 @@ class SubScopeProcessor(
             "val $superstateKeyName: SuperstateKey<$stateName> = SuperstateKey(\"$reducerName\")\n\n"
         }
 
-        // No @ReducerInjected/@ParentState properties: keep the plain function reference,
-        // unchanged from before either feature existed. With at least one, wrap it in a lambda
-        // that re-stamps each one from `dependencies` right after the user's own update()
-        // returns — see ReducerInjected's/ParentState's own docs for why this is "fresh as of
-        // the last update()," not continuously live on every read.
-        val copyAssignments = buildList {
-            reducerInjectedSlots.forEach { slot -> add("${slot.propertyName} = dependencies.resolve(${slot.keyName})") }
-            ownParentStateSlot?.let { slot ->
-                val parentReducerName = slot.parentReducer.declaration.simpleName.asString()
-                val parentKeyName = "${parentReducerName.replaceFirstChar { it.lowercase() }}SuperstateKey"
-                add("${slot.propertyName} = dependencies.resolve($parentKeyName)")
-            }
-        }
+        // No @ReducerInjected properties: keep the plain function reference, unchanged from
+        // before that feature existed. With at least one, wrap it in a lambda that re-stamps each
+        // from `dependencies` right after the user's own update() returns — see ReducerInjected's
+        // own doc for why this is "fresh as of the last update()," not continuously live on every
+        // read. @ParentState is deliberately NOT folded in here anymore — see ownParentStateSlot's
+        // use below, which wires ScopeConfig.liveAncestorKey/deriveFromLiveAncestor instead, a
+        // synchronously-pushed cascade rather than a wait-for-this-reducer's-own-next-update()
+        // re-stamp (see that field's own doc in ScopeConfig.kt for why this changed, and
+        // ParentState's own doc for the device-confirmed bug the old approach had).
+        val copyAssignments = reducerInjectedSlots.map { slot -> "${slot.propertyName} = dependencies.resolve(${slot.keyName})" }
         val updateBody = if (copyAssignments.isEmpty()) {
             "$reducerName::update"
         } else {
             "{ state, action, effects, dependencies -> " +
                 "$reducerName.update(state, action, effects, dependencies).copy(${copyAssignments.joinToString(", ")}) }"
+        }
+
+        val parentKeyName = ownParentStateSlot?.let { slot ->
+            val parentReducerName = slot.parentReducer.declaration.simpleName.asString()
+            "${parentReducerName.replaceFirstChar { it.lowercase() }}SuperstateKey"
+        }
+        val liveAncestorFields = if (ownParentStateSlot == null || parentKeyName == null) {
+            ""
+        } else {
+            ",\n        liveAncestorKey = $parentKeyName,\n" +
+                "        deriveFromLiveAncestor = { state, dependencies -> " +
+                "state.copy(${ownParentStateSlot.propertyName} = dependencies.resolve($parentKeyName)) }"
         }
 
         val superstateKeyImport = if (slotsNeedingSuperstateKey.isNotEmpty() || ownParentStateSlot != null) {
@@ -252,7 +261,7 @@ class SubScopeProcessor(
                 |    get() = ScopeConfig(
                 |        initial = $stateName(),
                 |        update = $updateBody,
-                |        subScopes = $subScopesBody
+                |        subScopes = $subScopesBody$liveAncestorFields
                 |    )
                 |
                 """.trimMargin()

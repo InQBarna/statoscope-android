@@ -594,6 +594,124 @@ private val defaultTriggerRootConfig = ScopeConfig<DefaultTriggerRootState, Defa
     subScopes = listOf(defaultTriggerRootMiddleSubScope)
 )
 
+// Live-ancestor cascade (ScopeConfig.liveAncestorKey/deriveFromLiveAncestor) — the synchronous,
+// direct-field-push mechanism that replaces the old "@ParentState re-stamps after THIS reducer's
+// own update() returns" approach, which permanently lagged by one cycle whenever the ancestor's
+// data changed as a side effect of the very event reading it (see ParentState.kt's own doc,
+// written before this cascade existed, for the device-confirmed real-app bug this closes).
+// Mirrors the newsfeed app's actual shape: a child delegates UserTappedFavorite up via
+// onChildAction, the owner's OWN update() is what actually changes favorites, and the child needs
+// the owner's brand new value WITHIN that same send() call, not on its own next event.
+private val cascadeOwnerKey = SuperstateKey<CascadeOwnerState>("CascadeOwner")
+
+private data class CascadeOwnerState(val favorites: List<String> = emptyList(), val child: CascadeChildState? = null)
+private sealed interface CascadeOwnerWhen {
+    data object ActivateChild : CascadeOwnerWhen
+    data object DeactivateChild : CascadeOwnerWhen
+    data class ToggleFavorite(val id: String) : CascadeOwnerWhen
+}
+
+// The placeholder default is deliberately distinct from anything the owner could ever hold, so a
+// test observing it proves the cascade never ran, not just that it happened to match by accident.
+private data class CascadeChildState(val parentFavorites: List<String> = listOf("placeholder-should-never-be-observed"))
+private sealed interface CascadeChildWhen {
+    data class UserTappedFavorite(val id: String) : CascadeChildWhen
+}
+private val cascadeChildConfig = ScopeConfig<CascadeChildState, CascadeChildWhen>(
+    initial = CascadeChildState(),
+    // Never touches parentFavorites itself — deriveFromLiveAncestor, below, is the only thing
+    // that ever writes it, proving the field's correctness comes entirely from the cascade.
+    update = { state, _, _, _ -> state },
+    liveAncestorKey = cascadeOwnerKey,
+    deriveFromLiveAncestor = { state, dependencies -> state.copy(parentFavorites = dependencies.resolve(cascadeOwnerKey).favorites) }
+)
+private val cascadeOwnerChildSubScope =
+    SubScope<CascadeOwnerState, CascadeOwnerWhen, CascadeChildState, CascadeChildWhen>(
+        config = cascadeChildConfig,
+        get = { it.child },
+        set = { state, child -> state.copy(child = child) },
+        onChildAction = { childWhen, _, _ ->
+            when (childWhen) {
+                is CascadeChildWhen.UserTappedFavorite -> CascadeOwnerWhen.ToggleFavorite(childWhen.id)
+            }
+        },
+        superstateKey = cascadeOwnerKey
+    )
+private val cascadeOwnerConfig = ScopeConfig<CascadeOwnerState, CascadeOwnerWhen>(
+    initial = CascadeOwnerState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is CascadeOwnerWhen.ActivateChild -> state.copy(child = CascadeChildState())
+            is CascadeOwnerWhen.DeactivateChild -> state.copy(child = null)
+            is CascadeOwnerWhen.ToggleFavorite ->
+                state.copy(favorites = if (action.id in state.favorites) state.favorites - action.id else state.favorites + action.id)
+        }
+    },
+    subScopes = listOf(cascadeOwnerChildSubScope)
+)
+
+// Root -> Middle -> Leaf, the Leaf skipping its direct parent to read the Root's own live state —
+// proving the cascade reaches a skip-level dependent too, with zero plumbing at the Middle level,
+// the same shape testSuperstateKeySkipLevelReflectsLiveMiddleStateNotStaleRootMirror already
+// proves for plain on-demand resolve().
+private val cascadeRootKey = SuperstateKey<CascadeRootState>("CascadeRoot")
+
+private data class CascadeRootState(val favorites: List<String> = emptyList(), val middle: CascadeMiddleState? = null)
+private sealed interface CascadeRootWhen {
+    data object ActivateMiddle : CascadeRootWhen
+    data class ToggleFavorite(val id: String) : CascadeRootWhen
+}
+
+private data class CascadeMiddleState(val leaf: CascadeLeafState? = null)
+private sealed interface CascadeMiddleWhen {
+    data object ActivateLeaf : CascadeMiddleWhen
+}
+
+private data class CascadeLeafState(val rootFavorites: List<String> = listOf("placeholder"))
+private sealed interface CascadeLeafWhen {
+    data object NoOp : CascadeLeafWhen
+}
+
+// Deliberately no superstateKey here — inherited unchanged from the root, exactly like
+// stalenessMiddleLeafSubScope above.
+private val cascadeMiddleLeafSubScope =
+    SubScope<CascadeMiddleState, CascadeMiddleWhen, CascadeLeafState, CascadeLeafWhen>(
+        config = ScopeConfig(
+            initial = CascadeLeafState(),
+            update = { state, _, _, _ -> state },
+            liveAncestorKey = cascadeRootKey,
+            deriveFromLiveAncestor = { state, dependencies -> state.copy(rootFavorites = dependencies.resolve(cascadeRootKey).favorites) }
+        ),
+        get = { it.leaf },
+        set = { state, leaf -> state.copy(leaf = leaf) }
+    )
+private val cascadeMiddleConfig = ScopeConfig<CascadeMiddleState, CascadeMiddleWhen>(
+    initial = CascadeMiddleState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is CascadeMiddleWhen.ActivateLeaf -> state.copy(leaf = CascadeLeafState())
+        }
+    },
+    subScopes = listOf(cascadeMiddleLeafSubScope)
+)
+private val cascadeRootMiddleSubScope =
+    SubScope<CascadeRootState, CascadeRootWhen, CascadeMiddleState, CascadeMiddleWhen>(
+        config = cascadeMiddleConfig,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) },
+        superstateKey = cascadeRootKey
+    )
+private val cascadeRootConfig = ScopeConfig<CascadeRootState, CascadeRootWhen>(
+    initial = CascadeRootState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is CascadeRootWhen.ActivateMiddle -> state.copy(middle = CascadeMiddleState())
+            is CascadeRootWhen.ToggleFavorite -> state.copy(favorites = state.favorites + action.id)
+        }
+    },
+    subScopes = listOf(cascadeRootMiddleSubScope)
+)
+
 class ScopeStoreTest {
 
     // scopeEffectsDisabledInUnitTests defaults to true under JUnit (see ScopeStore.kt) so a test
@@ -1101,6 +1219,96 @@ class ScopeStoreTest {
             1, grandchild.state.initializeCount,
             "defaultTrigger fires for every activation, including an init-time pre-populated " +
                 "one — a deliberate Kotlin choice, see ScopeConfig.defaultTrigger's own doc"
+        )
+    }
+
+    // MARK: - Live-ancestor cascade (ScopeConfig.liveAncestorKey/deriveFromLiveAncestor)
+
+    @Test
+    fun testLiveAncestorCascadePushesTheOwnersCurrentValueImmediatelyAtActivation() {
+        val owner = createScope(cascadeOwnerConfig)
+        // A real favorite exists BEFORE the child is even created — proving activation pushes
+        // the owner's genuinely current value, not just happens to match an empty default.
+        owner.send(CascadeOwnerWhen.ToggleFavorite("pre-existing"))
+        owner.send(CascadeOwnerWhen.ActivateChild)
+
+        val child = owner.childStore(cascadeOwnerChildSubScope)!!
+
+        assertEquals(
+            listOf("pre-existing"), child.state.parentFavorites,
+            "the child's very first observable state should already reflect the owner's current " +
+                "value, never config.initial's own placeholder default"
+        )
+    }
+
+    @Test
+    fun testLiveAncestorCascadePushesWithinTheSameSendThatCausedTheOwnersChange() {
+        val owner = createScope(cascadeOwnerConfig)
+        owner.send(CascadeOwnerWhen.ActivateChild)
+        val child = owner.childStore(cascadeOwnerChildSubScope)!!
+        assertEquals(emptyList<String>(), child.state.parentFavorites)
+
+        // The exact device-confirmed bug scenario: the child's own event is what CAUSES the
+        // owner's change (via onChildAction delegation), not something unrelated to it. The old
+        // "re-stamp after this reducer's own update() returns" approach always lagged here —
+        // this one send() call must leave the child already showing the owner's new value.
+        child.send(CascadeChildWhen.UserTappedFavorite("x"))
+
+        assertEquals(listOf("x"), owner.state.favorites, "sanity: the delegation itself worked")
+        assertEquals(
+            listOf("x"), child.state.parentFavorites,
+            "no lag: the cascade must push the owner's new value within the same send() call " +
+                "that caused it, not wait for the child's own next event"
+        )
+
+        // And the reverse direction (toggling off) must be immediate too, not lag by one more tap.
+        child.send(CascadeChildWhen.UserTappedFavorite("x"))
+        assertEquals(emptyList<String>(), owner.state.favorites)
+        assertEquals(emptyList<String>(), child.state.parentFavorites)
+    }
+
+    @Test
+    fun testLiveAncestorCascadeReachesASkipLevelDescendantWithNoPlumbingAtTheMiddleLevel() {
+        val root = createScope(cascadeRootConfig)
+        root.send(CascadeRootWhen.ToggleFavorite("x"))
+        root.send(CascadeRootWhen.ActivateMiddle)
+        val middle = root.childStore(cascadeRootMiddleSubScope)!!
+        middle.send(CascadeMiddleWhen.ActivateLeaf)
+        val leaf = middle.childStore(cascadeMiddleLeafSubScope)!!
+
+        assertEquals(
+            listOf("x"), leaf.state.rootFavorites,
+            "the leaf's very first state should already reflect the root's current value, " +
+                "through the middle's inherited (unlabeled) SuperstateKey"
+        )
+
+        root.send(CascadeRootWhen.ToggleFavorite("y"))
+
+        assertEquals(
+            listOf("x", "y"), leaf.state.rootFavorites,
+            "a later root-level change should push straight through to the skip-level leaf, " +
+                "with no action at the middle level at all"
+        )
+    }
+
+    @Test
+    fun testDeactivatingADependentStopsItFromReceivingFurtherPushesAndDoesNotLeakIntoARecreatedChild() {
+        val owner = createScope(cascadeOwnerConfig)
+        owner.send(CascadeOwnerWhen.ActivateChild)
+        owner.childStore(cascadeOwnerChildSubScope)!!
+        owner.send(CascadeOwnerWhen.DeactivateChild)
+
+        // If the deactivated child's callback weren't removed, this would either act on a
+        // torn-down store or accumulate pointless registrations — neither should happen.
+        owner.send(CascadeOwnerWhen.ToggleFavorite("after-deactivation"))
+
+        owner.send(CascadeOwnerWhen.ActivateChild)
+        val secondChild = owner.childStore(cascadeOwnerChildSubScope)!!
+
+        assertEquals(
+            listOf("after-deactivation"), secondChild.state.parentFavorites,
+            "a freshly (re)activated child should see the owner's current value, with no " +
+                "leftover registration from the previous (deactivated) child interfering"
         )
     }
 }

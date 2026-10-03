@@ -170,11 +170,11 @@ object TestParentStateChildReducer {
     )
 
     sealed interface When {
-        // Deliberately a no-op in THIS reducer's own update() — see ParentState's own doc on
-        // timing: the generated wrapper re-stamps `parent` AFTER update() returns, so update()
-        // itself always sees the PREVIOUS cycle's value, never the one about to be resolved for
-        // the current call. Reading `state.parent` is for everything OUTSIDE update() — UI
-        // rendering, a later update() call — never within the same call that triggers the stamp.
+        // This reducer's own update() never touches `parent` at all — the generated
+        // liveAncestorKey/deriveFromLiveAncestor wiring (ScopeConfig.kt's own doc) is what keeps
+        // it current, pushed synchronously by ScopeStoreImpl the moment the parent commits a new
+        // state, including right at this child's own activation — never waiting for this
+        // reducer's own next update() the way the old re-stamp-after-update() approach did.
         data object Observe : When
     }
 
@@ -283,7 +283,7 @@ class SubScopeProcessorTest {
     // MARK: - @ParentState
 
     @Test
-    fun testParentStateResolvesTheParentsLiveStateAfterEveryChildUpdate() {
+    fun testParentStateIsAlreadyCorrectAtActivationWithNoEventNeeded() {
         val root = createScope(TestParentStateParentReducer.config)
         root.send(TestParentStateParentReducer.When.AddFavorite("a"))
         root.send(TestParentStateParentReducer.When.AddFavorite("b"))
@@ -291,18 +291,33 @@ class SubScopeProcessorTest {
 
         val child = root.childStore(testParentStateParentReducerChildSubScope)!!
 
-        // Before any event, the child holds its own placeholder default — not yet resolved
-        // (same "fresh as of the last update()" rule as @ReducerInjected).
-        assertEquals(0, child.state.parent.favorites.size)
-
-        // Observe is a no-op in the child's own update() — the generated wrapper is what
-        // re-stamps `parent`, visible on this state only once this call returns.
-        child.send(TestParentStateChildReducer.When.Observe)
-
+        // No event sent to the child at all — the generated liveAncestorKey/deriveFromLiveAncestor
+        // wiring pushes the parent's CURRENT state synchronously at activation, closing the
+        // "before any event, still holds the placeholder default" gap the old
+        // re-stamp-after-update() approach had.
         assertEquals(
             listOf("a", "b"), child.state.parent.favorites,
-            "a @ParentState property should resolve the parent's CURRENT state via the " +
-                "generated superstateKey wiring, with no hand-written SubScope needed"
+            "a @ParentState property should already reflect the parent's current state right at " +
+                "activation, with no hand-written SubScope and no event needed"
+        )
+    }
+
+    @Test
+    fun testParentStatePushesANewFavoriteWithNoEventOnTheChildAtAll() {
+        val root = createScope(TestParentStateParentReducer.config)
+        root.send(TestParentStateParentReducer.When.CreateChild)
+        val child = root.childStore(testParentStateParentReducerChildSubScope)!!
+        assertEquals(emptyList(), child.state.parent.favorites)
+
+        // A later change at the PARENT, with no event sent to the child at all — the cascade
+        // (ScopeStoreImpl.notifyLiveDependents) pushes it straight through, proving @ParentState
+        // is genuinely live, not just resolved once at activation.
+        root.send(TestParentStateParentReducer.When.AddFavorite("c"))
+
+        assertEquals(
+            listOf("c"), child.state.parent.favorites,
+            "a @ParentState property should reflect a later parent-level change with no event " +
+                "sent to the child at all"
         )
     }
 }

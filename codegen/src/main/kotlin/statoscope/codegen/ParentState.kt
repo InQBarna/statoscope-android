@@ -26,46 +26,40 @@ package statoscope.codegen
  * }
  * ```
  *
- * Mechanically, this generates the same two things a hand-written relationship would need: a
+ * Mechanically, this generates three things a hand-written relationship would need: a
  * `SuperstateKey<ParentState>` wired as the connecting `SubScope.superstateKey` (previously
  * always `null` for every `@SubState` relationship — see `CODEGEN.md`'s own documented
- * limitation this annotation closes), and — exactly like [ReducerInjected] — a generated
- * `update()` wrapper that re-stamps the annotated property from `dependencies.resolve(key)`
- * right after the reducer's own `update()` returns.
+ * limitation this annotation closes), and — on the CHILD's own generated `ScopeConfig` —
+ * `liveAncestorKey`/`deriveFromLiveAncestor` (see `ScopeConfig.kt`'s own doc), which is what
+ * actually keeps the property current: not a re-stamp folded into this reducer's own `update()`
+ * wrapper (that's still exactly what [ReducerInjected] does, since an injected value doesn't
+ * change on its own the way an ancestor's state does), but a synchronous push `ScopeStoreImpl`
+ * performs the moment the parent commits ANY new state of its own — including activation itself,
+ * before this reducer has processed a single event.
  *
- * The property's own declared default (`= NewsFeedListReducer.State()` above) is what the state
- * holds until the first `update()` call ever runs on this store; resolved fresh after every call
- * from then on, not continuously live on every read (unlike Swift's `@SuperState`, which
- * re-injects on every `store.state` access via a computed property) — same trade-off, and the
- * same reasoning, as [ReducerInjected].
+ * **This means an `@ParentState` property is genuinely live** — closer to Swift's own
+ * `@SuperState`-plus-`observed:true` guarantee than the earlier "fresh as of the last cycle"
+ * design this replaced. Reading `state.list.favorites.size` from *inside* this reducer's own
+ * `update()` body sees whatever the parent's state was at the moment this `update()` call started
+ * running (same as reading any other field of `state` — nothing here is special-cased to lag
+ * deliberately); reading it from the UI layer (`statoscope.android.compose.ConnectedChild` or a
+ * plain `collectAsState()`) sees the parent's value as of the LAST commit on either side, pushed
+ * synchronously, with no polling and no `Flow.combine()` dispatch gap.
  *
- * **The one easy-to-miss trap, worth stating plainly**: because the re-stamp happens *after*
- * this reducer's own `update()` returns, `update()` itself always sees the PREVIOUS cycle's
- * value for an `@ParentState` property — never the one being resolved for the call currently
- * running. `state.list.favorites.size` read from *inside* this reducer's own `update()` body is
- * stale by exactly one cycle, not live. Reading it is for code that runs after a cycle
- * completes — UI rendering, a later `update()` call — never from within the same `update()` call
- * whose own action might have changed what it resolves to.
- *
- * **A second, less obvious case of the same trap — confirmed on a real device, not just reasoned
- * about**: `@ParentState` lags by one of THIS reducer's own cycles even for UI display, whenever
- * the parent's data changes as a *side effect* of the very event reading it. E.g. a leaf's
- * `UserTappedFavoriteButton` that [OnChildAction] delegates up as `ToggledFavorite`: this
- * reducer's own `update()` runs (and the `@ParentState` wrapper re-stamps `list`) BEFORE
- * `onChildAction` ever delegates anything — the parent's `favorites` hasn't changed yet at that
- * point — and nothing re-triggers this reducer's own `update()` afterward to catch up once it
- * has. The displayed count is then permanently one tap behind whatever its own taps just
- * caused — toggle on, it still shows the old count; toggle off, it shows the count from the
- * *previous* toggle, and so on. For data a view needs to show that changes this way, read it
- * from the ANCESTOR's own state at the UI layer instead (already current there, with no resolve
- * timing at all — see `statoscope.android.compose.ConnectedChild`) — never through a descendant's
- * `@ParentState` property.
+ * **The device-confirmed case this was built to fix**: a leaf's `UserTappedFavoriteButton` that
+ * [OnChildAction] delegates up as `ToggledFavorite` — this child's own `update()` runs first (the
+ * delegation itself only happens afterward, in `SubScope`'s own middleware), so the OLD
+ * re-stamp-after-`update()` design always rendered one tap behind whatever its own tap just
+ * caused. With the push-based cascade, the moment the parent's `ToggledFavorite` handling commits
+ * the new `favorites` list, this child gets pushed the fresh value synchronously, within that
+ * same call — before anything else observes either store. `NewsFeedArticleScreen` in
+ * `statoscope-kotlin-examples` can read `state.list.favorites.size` directly again; it no longer
+ * needs `favoritesCount` threaded down by hand.
  *
  * Reacting to the child's own events (rather than reading the parent's state) is still
  * [OnChildAction]'s job — delegate the action, inject the read: the two mechanisms are
  * independent and commonly used together, matching how the hand-written `SubScope.onChildAction`/
- * `superstateKey` pair already works. Just don't expect the injected read to already reflect
- * what that same delegation is about to cause.
+ * `superstateKey` pair already works.
  */
 @Target(AnnotationTarget.PROPERTY)
 @Retention(AnnotationRetention.SOURCE)
