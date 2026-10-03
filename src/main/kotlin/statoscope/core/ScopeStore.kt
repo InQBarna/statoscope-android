@@ -618,17 +618,42 @@ private class ScopeStoreImpl<State, When>(
         // the real owner — possibly several levels up, through a chain of inherited
         // Dependencies — and register a callback with it, so every later state commit from that
         // owner pushes straight into this child without waiting for the child's own next event.
-        // Run the derivation once right here, too, synchronously, before defaultTrigger below
-        // ever fires — so this child's very first observable state already reflects the owner's
-        // true current value, never config.initial's own placeholder default.
+        // Run it once right here, too, synchronously, before defaultTrigger below ever fires —
+        // so this child's very first observable state already reflects the owner's true current
+        // value, never config.initial's own placeholder default.
+        //
+        // Critically, the push ALSO re-mirrors into THIS store's own field for it (the same
+        // subScope.set the middleware above performs on every real send()) — childStore's own
+        // mutableStateFlow isn't the only place a reader can observe this child's state from.
+        // ConnectedChild (statoscope.android.compose) deliberately reads a child through its
+        // DIRECT PARENT's own collected stateFlow (subScope.get(parentState)), not a second
+        // subscription on the child itself — exactly so one parent-level collectAsState() catches
+        // both "child created/destroyed" and "child's own state changed." Without re-mirroring
+        // here, reDeriveFromLiveAncestor's direct write would correct childStore.state (every
+        // ScopeStoreTest/NewsFeedTest assertion that reads the child store directly would still
+        // pass) while leaving THIS field of this store's own state — what a real app's UI
+        // actually renders through — showing the pre-cascade value: the exact gap that let the
+        // newsfeed app's on-device lag survive this cascade's first version even after its own
+        // unit tests went green.
+        //
+        // mutableStateFlow.update {}, not a synchronized assignment, for the same reason
+        // reDeriveFromLiveAncestor's own write is lock-free: this runs from inside the OWNER's
+        // notifyLiveDependents (see below), on the OWNER's own thread — for a skip-level owner,
+        // `this` is a DIFFERENT instance (an intermediate ancestor) than that owner, and
+        // synchronizing on it here would be the exact ancestor-acquires-descendant's-lock
+        // ordering reDeriveFromLiveAncestor's own doc explains is a real cross-thread deadlock
+        // risk against the existing child-delegates-up path.
         childStore.config.liveAncestorKey?.let { key ->
             val owner = childStore.dependencies.findSuperstateOwnerOrNull(key)
-            if (owner != null) {
-                val callback = { childStore.reDeriveFromLiveAncestor() }
-                owner.registerLiveDependent(callback)
-                childStore.liveAncestorUnregister = { owner.unregisterLiveDependent(callback) }
+            val pushAndMirror = {
+                childStore.reDeriveFromLiveAncestor()
+                mutableStateFlow.update { current -> subScope.set(current, childStore.state) }
             }
-            childStore.reDeriveFromLiveAncestor()
+            if (owner != null) {
+                owner.registerLiveDependent(pushAndMirror)
+                childStore.liveAncestorUnregister = { owner.unregisterLiveDependent(pushAndMirror) }
+            }
+            pushAndMirror()
         }
 
         activeChildren[subScope] = childStore

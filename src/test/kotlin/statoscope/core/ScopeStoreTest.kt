@@ -1239,6 +1239,12 @@ class ScopeStoreTest {
             "the child's very first observable state should already reflect the owner's current " +
                 "value, never config.initial's own placeholder default"
         )
+        assertEquals(
+            listOf("pre-existing"), owner.state.child?.parentFavorites,
+            "the push must also be visible through the OWNER's own mirrored copy of the child " +
+                "— the exact read path statoscope.android.compose.ConnectedChild actually uses " +
+                "(subScope.get(parentState)), not a second subscription on the child itself"
+        )
     }
 
     @Test
@@ -1260,11 +1266,17 @@ class ScopeStoreTest {
             "no lag: the cascade must push the owner's new value within the same send() call " +
                 "that caused it, not wait for the child's own next event"
         )
+        assertEquals(
+            listOf("x"), owner.state.child?.parentFavorites,
+            "no lag through the OWNER's own mirror either — the read path a real Compose UI " +
+                "(ConnectedChild) actually uses, not just the child store's own stateFlow"
+        )
 
         // And the reverse direction (toggling off) must be immediate too, not lag by one more tap.
         child.send(CascadeChildWhen.UserTappedFavorite("x"))
         assertEquals(emptyList<String>(), owner.state.favorites)
         assertEquals(emptyList<String>(), child.state.parentFavorites)
+        assertEquals(emptyList<String>(), owner.state.child?.parentFavorites)
     }
 
     @Test
@@ -1288,6 +1300,12 @@ class ScopeStoreTest {
             listOf("x", "y"), leaf.state.rootFavorites,
             "a later root-level change should push straight through to the skip-level leaf, " +
                 "with no action at the middle level at all"
+        )
+        assertEquals(
+            listOf("x", "y"), middle.state.leaf?.rootFavorites,
+            "the push must also reach the MIDDLE's own mirror of the leaf — middle is the " +
+                "leaf's real structural parent regardless of which ancestor owns the key, and " +
+                "that mirror is what a nested ConnectedChild(middleStore, ...) would read"
         )
     }
 
