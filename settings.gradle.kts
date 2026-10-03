@@ -16,6 +16,9 @@ pluginManagement {
         // Verified compatible with 2.3.20 above by actually building and running against it
         // (see :codegen-processor's self-test) before pinning this.
         id("com.google.devtools.ksp") version "2.3.12"
+        // :android's Compose integration helpers (feature/compose-integration branch) — paired
+        // with the exact Kotlin version above, same convention as every other plugin here.
+        id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
     }
 }
 
