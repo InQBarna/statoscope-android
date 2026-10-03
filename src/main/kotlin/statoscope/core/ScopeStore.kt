@@ -518,6 +518,11 @@ private class ScopeStoreImpl<State, When>(
         }
 
         activeChildren[subScope] = childStore
+
+        // See ScopeConfig.defaultTrigger's own doc for exactly what fires and when (every
+        // activation, including an init-time pre-populated one) and what deliberately doesn't
+        // (a plain createScope root).
+        subScope.config.defaultTrigger?.let { trigger -> childStore.send(trigger) }
     }
 
     private fun <ChildState, ChildWhen> deactivateChild(subScope: SubScope<State, When, ChildState, ChildWhen>) {

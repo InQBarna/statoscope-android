@@ -475,6 +475,125 @@ private val prePopulatedRootConfig = ScopeConfig<PrePopulatedRootState, PrePopul
     subScopes = listOf(prePopulatedRootMiddleSubScope)
 )
 
+// Ports Swift's defaultTrigger tests (`MiddlewareReducerTests.swift`'s "defaultTrigger Tests"
+// section) — an event a config declares to fire automatically, exactly once, the moment a scope
+// built from it is activated as a child. See ScopeConfig.defaultTrigger's own doc for the one
+// deliberate divergence from Swift tested separately below: Kotlin fires it uniformly for every
+// activation, including an init-time pre-populated one, where Swift's own recursive descent
+// suppresses it (`triggerDefaults: false`).
+private data class DefaultTriggerChildState(val initializeCount: Int = 0, val otherEventCount: Int = 0)
+private sealed interface DefaultTriggerChildWhen {
+    data object OnAppear : DefaultTriggerChildWhen
+    data object SomeOtherEvent : DefaultTriggerChildWhen
+}
+private val defaultTriggerChildUpdate: Reducer<DefaultTriggerChildState, DefaultTriggerChildWhen> = { state, action, _, _ ->
+    when (action) {
+        is DefaultTriggerChildWhen.OnAppear -> state.copy(initializeCount = state.initializeCount + 1)
+        is DefaultTriggerChildWhen.SomeOtherEvent -> state.copy(otherEventCount = state.otherEventCount + 1)
+    }
+}
+private val defaultTriggerChildConfig = ScopeConfig(
+    initial = DefaultTriggerChildState(),
+    update = defaultTriggerChildUpdate,
+    defaultTrigger = DefaultTriggerChildWhen.OnAppear
+)
+// Same shape, deliberately no defaultTrigger — proves "no defaultTrigger means no automatic event."
+private val noDefaultTriggerChildConfig = ScopeConfig(
+    initial = DefaultTriggerChildState(),
+    update = defaultTriggerChildUpdate
+)
+
+private data class DefaultTriggerParentState(val child: DefaultTriggerChildState? = null)
+private sealed interface DefaultTriggerParentWhen {
+    data object CreateChild : DefaultTriggerParentWhen
+    data object DestroyChild : DefaultTriggerParentWhen
+}
+private val defaultTriggerParentUpdate: Reducer<DefaultTriggerParentState, DefaultTriggerParentWhen> = { state, action, _, _ ->
+    when (action) {
+        is DefaultTriggerParentWhen.CreateChild -> state.copy(child = DefaultTriggerChildState())
+        is DefaultTriggerParentWhen.DestroyChild -> state.copy(child = null)
+    }
+}
+
+private val defaultTriggerChildSubScope =
+    SubScope<DefaultTriggerParentState, DefaultTriggerParentWhen, DefaultTriggerChildState, DefaultTriggerChildWhen>(
+        config = defaultTriggerChildConfig,
+        get = { it.child },
+        set = { state, child -> state.copy(child = child) }
+    )
+private val defaultTriggerParentConfig = ScopeConfig(
+    initial = DefaultTriggerParentState(),
+    update = defaultTriggerParentUpdate,
+    subScopes = listOf(defaultTriggerChildSubScope)
+)
+
+private val noDefaultTriggerChildSubScope =
+    SubScope<DefaultTriggerParentState, DefaultTriggerParentWhen, DefaultTriggerChildState, DefaultTriggerChildWhen>(
+        config = noDefaultTriggerChildConfig,
+        get = { it.child },
+        set = { state, child -> state.copy(child = child) }
+    )
+private val noDefaultTriggerParentConfig = ScopeConfig(
+    initial = DefaultTriggerParentState(),
+    update = defaultTriggerParentUpdate,
+    subScopes = listOf(noDefaultTriggerChildSubScope)
+)
+
+// A separate, minimal root -> middle -> grandchild tree (not reusing the PrePopulated* fixtures
+// above, to keep this test's concern isolated) proving defaultTrigger also fires for a
+// grandchild activated via ScopeStoreImpl's init-time pre-populated-child path, not just the
+// normal one-field-at-a-time update() transition.
+private data class DefaultTriggerGrandchildState(val initializeCount: Int = 0)
+private sealed interface DefaultTriggerGrandchildWhen {
+    data object OnAppear : DefaultTriggerGrandchildWhen
+}
+private val defaultTriggerGrandchildConfig = ScopeConfig<DefaultTriggerGrandchildState, DefaultTriggerGrandchildWhen>(
+    initial = DefaultTriggerGrandchildState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is DefaultTriggerGrandchildWhen.OnAppear -> state.copy(initializeCount = state.initializeCount + 1)
+        }
+    },
+    defaultTrigger = DefaultTriggerGrandchildWhen.OnAppear
+)
+
+private data class DefaultTriggerMiddleState(val grandchild: DefaultTriggerGrandchildState? = null)
+private sealed interface DefaultTriggerMiddleWhen {
+    data object NoOp : DefaultTriggerMiddleWhen
+}
+private val defaultTriggerMiddleGrandchildSubScope =
+    SubScope<DefaultTriggerMiddleState, DefaultTriggerMiddleWhen, DefaultTriggerGrandchildState, DefaultTriggerGrandchildWhen>(
+        config = defaultTriggerGrandchildConfig,
+        get = { it.grandchild },
+        set = { state, grandchild -> state.copy(grandchild = grandchild) }
+    )
+private val defaultTriggerMiddleConfig = ScopeConfig<DefaultTriggerMiddleState, DefaultTriggerMiddleWhen>(
+    initial = DefaultTriggerMiddleState(),
+    update = { state, _, _, _ -> state },
+    subScopes = listOf(defaultTriggerMiddleGrandchildSubScope)
+)
+
+private data class DefaultTriggerRootState(val middle: DefaultTriggerMiddleState? = null)
+private sealed interface DefaultTriggerRootWhen {
+    data object CreateMiddleWithGrandchildAlreadyPresent : DefaultTriggerRootWhen
+}
+private val defaultTriggerRootMiddleSubScope =
+    SubScope<DefaultTriggerRootState, DefaultTriggerRootWhen, DefaultTriggerMiddleState, DefaultTriggerMiddleWhen>(
+        config = defaultTriggerMiddleConfig,
+        get = { it.middle },
+        set = { state, middle -> state.copy(middle = middle) }
+    )
+private val defaultTriggerRootConfig = ScopeConfig<DefaultTriggerRootState, DefaultTriggerRootWhen>(
+    initial = DefaultTriggerRootState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is DefaultTriggerRootWhen.CreateMiddleWithGrandchildAlreadyPresent ->
+                state.copy(middle = DefaultTriggerMiddleState(grandchild = DefaultTriggerGrandchildState()))
+        }
+    },
+    subScopes = listOf(defaultTriggerRootMiddleSubScope)
+)
+
 class ScopeStoreTest {
 
     // scopeEffectsDisabledInUnitTests defaults to true under JUnit (see ScopeStore.kt) so a test
@@ -923,6 +1042,65 @@ class ScopeStoreTest {
                 "update() call that created the child, not a separate later event) should have " +
                 "its own real ScopeStore activated too — Swift does this recursively at " +
                 "child-creation time (Store.swift's _applyChildSlotsRecursively)"
+        )
+    }
+
+    // MARK: - ScopeConfig.defaultTrigger
+
+    @Test
+    fun testDefaultTriggerFiresExactlyOnceWhenChildIsWired() {
+        val root = createScope(defaultTriggerParentConfig)
+        root.send(DefaultTriggerParentWhen.CreateChild)
+
+        val child = root.childStore(defaultTriggerChildSubScope)!!
+        assertEquals(1, child.state.initializeCount, "defaultTrigger should fire exactly once on wiring")
+    }
+
+    @Test
+    fun testDefaultTriggerFiresOnlyOnceNotOnSubsequentEvents() {
+        val root = createScope(defaultTriggerParentConfig)
+        root.send(DefaultTriggerParentWhen.CreateChild)
+        val child = root.childStore(defaultTriggerChildSubScope)!!
+
+        child.send(DefaultTriggerChildWhen.SomeOtherEvent)
+        child.send(DefaultTriggerChildWhen.SomeOtherEvent)
+
+        assertEquals(1, child.state.initializeCount, "defaultTrigger fires only on wiring, not on subsequent events")
+        assertEquals(2, child.state.otherEventCount)
+    }
+
+    @Test
+    fun testDefaultTriggerFiresAgainWhenChildIsRecreated() {
+        val root = createScope(defaultTriggerParentConfig)
+        root.send(DefaultTriggerParentWhen.CreateChild)
+        root.send(DefaultTriggerParentWhen.DestroyChild)
+        root.send(DefaultTriggerParentWhen.CreateChild)
+
+        val child = root.childStore(defaultTriggerChildSubScope)!!
+        assertEquals(1, child.state.initializeCount, "a freshly (re)created child gets its own defaultTrigger")
+    }
+
+    @Test
+    fun testNoDefaultTriggerForAReducerWithoutOne() {
+        val root = createScope(noDefaultTriggerParentConfig)
+        root.send(DefaultTriggerParentWhen.CreateChild)
+
+        val child = root.childStore(noDefaultTriggerChildSubScope)!!
+        assertEquals(0, child.state.initializeCount, "no defaultTrigger means no automatic event")
+    }
+
+    @Test
+    fun testDefaultTriggerFiresForAnInitTimePrePopulatedChildToo() {
+        val root = createScope(defaultTriggerRootConfig)
+        root.send(DefaultTriggerRootWhen.CreateMiddleWithGrandchildAlreadyPresent)
+
+        val middle = root.childStore(defaultTriggerRootMiddleSubScope)!!
+        val grandchild = middle.childStore(defaultTriggerMiddleGrandchildSubScope)!!
+
+        assertEquals(
+            1, grandchild.state.initializeCount,
+            "defaultTrigger fires for every activation, including an init-time pre-populated " +
+                "one — a deliberate Kotlin choice, see ScopeConfig.defaultTrigger's own doc"
         )
     }
 }

@@ -53,13 +53,40 @@ typealias OnDescendantAction<State, When> =
 /**
  * Configuration for a scope: its initial state, its [Reducer], any [InjectionKey] overrides for
  * that scope, any [SubScope]s it composes with (Tutorial 05) — child scopes it creates, mirrors,
- * and tears down as fields of its own [State] go non-null/null — and an optional
- * [OnDescendantAction] for reacting to any descendant's event at any depth.
+ * and tears down as fields of its own [State] go non-null/null — an optional
+ * [OnDescendantAction] for reacting to any descendant's event at any depth, and an optional
+ * [defaultTrigger] dispatched automatically, once, when a scope using this config is activated
+ * as a child (see that property's own doc).
  */
 data class ScopeConfig<State, When>(
     val initial: State,
     val update: Reducer<State, When>,
     val provide: List<Pair<InjectionKey<*>, Any?>> = emptyList(),
     val subScopes: List<SubScope<State, When, *, *>> = emptyList(),
-    val onDescendantAction: OnDescendantAction<State, When>? = null
+    val onDescendantAction: OnDescendantAction<State, When>? = null,
+    /**
+     * An event dispatched automatically, exactly once, right after a scope built from this
+     * config is activated as a child (see [ScopeStoreImpl.activateChild]) — ports Swift's
+     * `Reducer.defaultTrigger` (`Reducer.swift`): `static var defaultTrigger: When? { .onAppear }`.
+     * The common "fetch as soon as this scope exists" case this replaces: before this existed,
+     * the UI layer had to send that first event itself (`statoscope-kotlin-examples`'
+     * `NewsFeedScreens.kt` used a Compose `LaunchedEffect(listStore) { listStore.send(...) }` for
+     * exactly this, worth revisiting now that this exists) — a responsibility that belongs to
+     * the reducer declaring what it needs on creation, not to whichever UI happens to render it.
+     *
+     * Deliberately a *fixed* value, not a function of [dependencies][Dependencies] or anything
+     * else — if the trigger's own handling needs to resolve something, it does that the normal
+     * way, inside its own `update()` case, exactly like any other event.
+     *
+     * Fires for every activation, not just the ones reached through a normal one-field-at-a-time
+     * `update()` transition — including a child that arrives already non-null as part of a
+     * parent's own initial construction (see [ScopeStoreImpl]'s init-time activation, Issue 10 in
+     * `PARITY_AUDIT.md`) — a deliberate choice, not a strict port of Swift's own recursive
+     * `triggerDefaults: false` suppression for that case: "this child now exists" is true either
+     * way, and firing uniformly is simpler to reason about than firing only sometimes depending
+     * on how the child came to exist. Never fires for a plain [createScope] root (nothing to be
+     * "activated as a child" of) — call [ScopeStore.send] yourself right after construction for
+     * that, the same way an app always could.
+     */
+    val defaultTrigger: When? = null
 )
