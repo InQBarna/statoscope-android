@@ -15,6 +15,7 @@ import statoscope.core.EffectsState
 import statoscope.core.ScopeConfig
 import statoscope.core.SuperstateKey
 import statoscope.core.map
+import statoscope.core.mapToResult
 
 private data class CounterState(val count: Int = 0)
 
@@ -65,6 +66,31 @@ private val networkConfig = ScopeConfig<NetworkState, NetworkWhen>(
                 state.copy(loading = true)
             }
             is NetworkWhen.Loaded -> state.copy(loading = false, value = action.value)
+        }
+    }
+)
+
+// A mapToResult()-wired fixture — RawNetworkFetch above has no failure-handling at all, so it
+// can't exercise onEffectFails's "the chain actually catches it" path.
+private data class ResultNetworkState(val loading: Boolean = false, val error: String? = null, val value: Int = 0)
+
+private sealed interface ResultNetworkWhen {
+    data object Load : ResultNetworkWhen
+    data class Completed(val result: Result<Int>) : ResultNetworkWhen
+}
+
+private val resultNetworkConfig = ScopeConfig<ResultNetworkState, ResultNetworkWhen>(
+    initial = ResultNetworkState(),
+    update = { state, action, effects, _ ->
+        when (action) {
+            is ResultNetworkWhen.Load -> {
+                effects.enqueue(RawNetworkFetch().mapToResult().map(ResultNetworkWhen::Completed))
+                state.copy(loading = true)
+            }
+            is ResultNetworkWhen.Completed -> action.result.fold(
+                onSuccess = { state.copy(loading = false, value = it) },
+                onFailure = { state.copy(loading = false, error = it.message) }
+            )
         }
     }
 )
@@ -152,6 +178,38 @@ class TestPlanTest {
     fun testOnEffectCompletesFailsClearlyWhenNoMatchingEffectIsPending() {
         val plan = given(networkConfig).onEffectCompletes(RawNetworkFetch::class, 42)
         assertFailsWith<IllegalStateException> { plan.runTest() }
+    }
+
+    // MARK: - onEffectFails (the failure-path counterpart to onEffectCompletes)
+
+    @Test
+    fun testOnEffectFailsReplaysTheFailureThroughTheRealMapToResultChain() {
+        given(resultNetworkConfig)
+            .on(ResultNetworkWhen.Load)
+            .onEffectFails(RawNetworkFetch::class, IllegalStateException("boom"))
+            .thenEquals(ResultNetworkState::error, "boom")
+            .thenEquals(ResultNetworkState::loading, false)
+            .runTest()
+    }
+
+    @Test
+    fun testOnEffectFailsFailsClearlyWhenNoMatchingEffectIsPending() {
+        val plan = given(resultNetworkConfig).onEffectFails(RawNetworkFetch::class, IllegalStateException("boom"))
+        assertFailsWith<IllegalStateException> { plan.runTest() }
+    }
+
+    @Test
+    fun testOnEffectFailsRethrowsWhenNothingInTheChainCatchesIt() {
+        // networkConfig's effect is a plain .map(), no .mapToResult() anywhere — simulating a
+        // failure here has nothing to catch it, so it must propagate to the caller, same as a
+        // real failure would in that shape.
+        val boom = IllegalStateException("boom")
+        val plan = given(networkConfig)
+            .on(NetworkWhen.Load)
+            .onEffectFails(RawNetworkFetch::class, boom)
+
+        val error = assertFailsWith<IllegalStateException> { plan.runTest() }
+        assertTrue(error === boom, "the exact same error must propagate, not get swallowed or replaced")
     }
 
     // MARK: - withSuperstate (standing in for a SuperstateKey's missing real ancestor)

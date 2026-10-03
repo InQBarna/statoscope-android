@@ -17,6 +17,8 @@ import kotlin.test.assertTrue
 import statoscope.core.Effect
 import statoscope.core.ScopeConfig
 import statoscope.core.SubScope
+import statoscope.core.map
+import statoscope.core.mapToResult
 
 private data class ChildState(val loading: Boolean = false, val loadedValue: String? = null)
 
@@ -24,12 +26,20 @@ private sealed interface ChildWhen {
     data object Load : ChildWhen
     data class Loaded(val value: String) : ChildWhen
     data class LoadFailed(val reason: String) : ChildWhen
+    data object LoadViaMapToResult : ChildWhen
+    data class ResultCompleted(val result: Result<String>) : ChildWhen
 }
 
 /** Never actually run by any test here — every completion is simulated via
  *  [StoreTestPlan.onOldestEffectCompletes], proving that call never falls through to real work. */
 private class FixedLoadEffect(private val value: String) : Effect<ChildWhen> {
     override suspend fun run(): ChildWhen = error("must never actually run — completion is simulated")
+}
+
+/** Wired through a real `.mapToResult()` chain — unlike [FixedLoadEffect] above — so it can
+ *  exercise [StoreTestPlan.completeEffectWithFailure]'s actual failure-catching replay. */
+private class ResultLoadEffect : Effect<String> {
+    override suspend fun run(): String = error("must never actually run — completion is simulated")
 }
 
 private val childConfig = ScopeConfig<ChildState, ChildWhen>(
@@ -42,6 +52,14 @@ private val childConfig = ScopeConfig<ChildState, ChildWhen>(
             }
             is ChildWhen.Loaded -> state.copy(loading = false, loadedValue = action.value)
             is ChildWhen.LoadFailed -> state.copy(loading = false, loadedValue = "error:${action.reason}")
+            is ChildWhen.LoadViaMapToResult -> {
+                effects.enqueue(ResultLoadEffect().mapToResult().map(ChildWhen::ResultCompleted))
+                state.copy(loading = true)
+            }
+            is ChildWhen.ResultCompleted -> action.result.fold(
+                onSuccess = { state.copy(loading = false, loadedValue = it) },
+                onFailure = { state.copy(loading = false, loadedValue = "error:${it.message}") }
+            )
         }
     }
 )
@@ -106,6 +124,29 @@ class StoreTestPlanTest {
         plan.runTest()
 
         assertFailsWith<IllegalStateException> { plan.runTest() }
+    }
+
+    @Test
+    fun testCompleteEffectWithFailureReplaysTheFailureThroughTheRealMapToResultChain() {
+        givenStore(parentConfig)
+            .on(ParentWhen.ActivateChild)
+            .with(childSubScope)
+            .on(ChildWhen.LoadViaMapToResult)
+            .completeEffectWithFailure(ResultLoadEffect::class, IllegalStateException("boom"))
+            .then { state -> assertEquals("error:boom", state.loadedValue) }
+            .pop()
+            .runTest()
+    }
+
+    @Test
+    fun testCompleteEffectWithFailureFailsClearlyWhenNoPendingEffectMatches() {
+        val plan = givenStore(parentConfig)
+            .on(ParentWhen.ActivateChild)
+            .with(childSubScope)
+            .completeEffectWithFailure(ResultLoadEffect::class, IllegalStateException("boom"))
+
+        val error = assertFailsWith<IllegalStateException> { plan.runTest() }
+        assertTrue(error.message!!.contains("no pending effect of that type"))
     }
 
     @Test

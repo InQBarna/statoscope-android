@@ -155,6 +155,24 @@ abstract class StoreTestPlan<State, When, Self : StoreTestPlan<State, When, Self
     }
 
     /**
+     * Same as [completeEffect], but simulates the pending effect of type [effectType]'s pristine
+     * effect THROWING [thrownError] instead of succeeding — replayed through its real
+     * `.map()`/`.mapToResult()` chain (see [ScopeStore.completeEffectWithFailure]), never a
+     * tester-guessed final [When] value. Mirrors Swift's `WHEN_EffectFails`. **Throws
+     * [thrownError] itself** if nothing in that effect's chain actually catches it (no
+     * `mapToResult()` anywhere between the pristine effect and the enqueue site) — same as a
+     * real failure would do in that shape.
+     */
+    fun <EffectType : Effect<*>> completeEffectWithFailure(effectType: KClass<EffectType>, thrownError: Throwable): Self {
+        addStep { store ->
+            check(store.completeEffectWithFailure(effectType, thrownError)) {
+                "completeEffectWithFailure(${effectType.simpleName}): no pending effect of that type"
+            }
+        }
+        return self()
+    }
+
+    /**
      * Descends into the child activated for [subScope] — every step recorded from here on drills
      * into `parentStore.childStore(subScope)` fresh each time it actually runs (never a value
      * captured once), so it always reaches whichever child instance is live at that point in the

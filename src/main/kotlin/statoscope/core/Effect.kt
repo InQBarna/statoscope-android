@@ -39,6 +39,18 @@ internal interface PristineHolder {
      * `AnyEffect.transformPristineResult`.
      */
     fun applyFromPristine(rawResult: Any?): Any?
+
+    /**
+     * Same as [applyFromPristine], but simulates the PRISTINE effect throwing [error] instead of
+     * succeeding — replayed through every [map] call chained onto it exactly like a real failure
+     * would propagate: a plain [map] never catches anything, so it just rethrows (or, more
+     * precisely, re-asks whatever it wraps, which eventually either rethrows too or — if
+     * something between here and the pristine effect is a [mapToResult]-style catcher — returns
+     * an ordinary value instead, which this and every [map] above it then treats as a normal
+     * [applyFromPristine]-style success to transform). Mirrors Swift's `_pristineCompletes`
+     * failure path (`WHEN_EffectFails`).
+     */
+    fun applyFromPristineFailure(error: Throwable): Any?
 }
 
 /**
@@ -66,6 +78,12 @@ fun <T, When> Effect<T>.map(transform: (T) -> When): Effect<When> {
             val throughOriginal = (original as? PristineHolder)?.applyFromPristine(rawResult) ?: rawResult
             return transform(throughOriginal as T)
         }
+
+        @Suppress("UNCHECKED_CAST")
+        override fun applyFromPristineFailure(error: Throwable): When {
+            val throughOriginal = (original as? PristineHolder)?.applyFromPristineFailure(error) ?: throw error
+            return transform(throughOriginal as T)
+        }
     }
 }
 
@@ -79,6 +97,19 @@ fun <T, When> Effect<T>.map(transform: (T) -> When): Effect<When> {
 @StatoscopeInternalApi
 fun <T> Effect<T>.completePristine(pristineResult: Any?): T =
     (this as? PristineHolder)?.applyFromPristine(pristineResult) as? T ?: pristineResult as T
+
+/**
+ * Simulates this effect's PRISTINE (never-mapped) effect throwing [error] instead of completing
+ * normally — replayed through every [map]/[mapToResult] call chained onto it, never actually
+ * calling [Effect.run]. Rethrows [error] itself, to the caller, when nothing in the chain catches
+ * it (no [mapToResult] anywhere between here and the pristine effect) — matching exactly what a
+ * REAL failure would do in that shape: propagate all the way out, uncaught. Ports Swift's
+ * `_pristineCompletes` failure path (`WHEN_EffectFails`).
+ */
+@Suppress("UNCHECKED_CAST")
+@StatoscopeInternalApi
+fun <T> Effect<T>.completePristineFailure(error: Throwable): T =
+    (this as? PristineHolder)?.applyFromPristineFailure(error) as? T ?: throw error
 
 /**
  * Builds an [Effect] straight from a suspend function — for the common case where whatever it's
@@ -130,6 +161,17 @@ fun <T> Effect<T>.mapToResult(): Effect<Result<T>> {
             @Suppress("UNCHECKED_CAST")
             ((original as? PristineHolder)?.applyFromPristine(rawResult) ?: rawResult) as T
         }
+
+        // The one place a simulated failure actually gets caught instead of just rethrown —
+        // mirrors run()'s own try/catch exactly, just fed a pretend error instead of a real
+        // thrown one. If `original` itself already catches (e.g. a nested mapToResult()),
+        // its own applyFromPristineFailure call below returns a plain value instead of
+        // throwing, and runCatchingEffect wraps that in Result.success — not Result.failure —
+        // same as a real run() that happened not to throw after all.
+        override fun applyFromPristineFailure(error: Throwable): Result<T> = runCatchingEffect {
+            @Suppress("UNCHECKED_CAST")
+            ((original as? PristineHolder)?.applyFromPristineFailure(error) ?: throw error) as T
+        }
     }
 }
 
@@ -149,6 +191,11 @@ fun <T, E> Effect<T>.mapToResult(errorMapper: (Throwable) -> E): Effect<EffectRe
         override fun applyFromPristine(rawResult: Any?): EffectResult<T, E> = runCatchingEffect {
             @Suppress("UNCHECKED_CAST")
             ((original as? PristineHolder)?.applyFromPristine(rawResult) ?: rawResult) as T
+        }.toEffectResult(errorMapper)
+
+        override fun applyFromPristineFailure(error: Throwable): EffectResult<T, E> = runCatchingEffect {
+            @Suppress("UNCHECKED_CAST")
+            ((original as? PristineHolder)?.applyFromPristineFailure(error) ?: throw error) as T
         }.toEffectResult(errorMapper)
     }
 }

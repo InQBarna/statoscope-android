@@ -135,4 +135,60 @@ class EffectTest {
         val effect = Failing(CancellationException("cancelled")).mapToResult { FetchError.NETWORK }
         assertFailsWith<CancellationException> { effect.run() }
     }
+
+    // MARK: - completePristineFailure (simulating a pristine effect's FAILURE, not its success)
+
+    @Test
+    fun testCompletePristineFailureOnAnUnmappedEffectRethrowsDirectly() {
+        val boom = IllegalStateException("boom")
+        val effect = RawFetch(1)
+        val error = assertFailsWith<IllegalStateException> { effect.completePristineFailure(boom) }
+        assertTrue(error === boom, "nothing here catches anything — the exact same error must propagate")
+    }
+
+    @Test
+    fun testCompletePristineFailurePropagatesUncaughtThroughAnyNumberOfPlainMaps() {
+        val boom = IllegalStateException("boom")
+        val effect = RawFetch(1).map { it.toString() }.map { "value=$it" }
+        val error = assertFailsWith<IllegalStateException> { effect.completePristineFailure(boom) }
+        assertTrue(error === boom, "a plain map() never catches — it must rethrow unchanged, same as a real run() would")
+    }
+
+    @Test
+    fun testCompletePristineFailureNeverCallsTheRealRun() {
+        var ran = false
+        val effect = (object : Effect<Int> {
+            override suspend fun run(): Int {
+                ran = true
+                return -1
+            }
+        }).map { it.toString() }
+
+        assertFailsWith<IllegalStateException> { effect.completePristineFailure(IllegalStateException("boom")) }
+        assertTrue(!ran, "completePristineFailure must never call the real run()")
+    }
+
+    @Test
+    fun testCompletePristineFailureThroughMapToResultIsCaughtAsResultFailure() {
+        val boom = IllegalStateException("boom")
+        val effect = RawFetch(1).mapToResult()
+        assertEquals(Result.failure<Int>(boom), effect.completePristineFailure(boom))
+    }
+
+    @Test
+    fun testCompletePristineFailureThroughMapToResultWithErrorMapperAppliesTheMapper() {
+        val effect = RawFetch(1).mapToResult { FetchError.NETWORK }
+        assertEquals(EffectResult.Failure(FetchError.NETWORK), effect.completePristineFailure(IllegalStateException("boom")))
+    }
+
+    // The real point of the recursive design, not just "mapToResult catches, map rethrows" in
+    // isolation: once something DOES catch, whatever's layered ON TOP of it treats the caught
+    // value as an ORDINARY success to transform — exactly like a real run() where the exception
+    // never escapes past the first catcher, so anything above it just sees a plain value.
+    @Test
+    fun testCompletePristineFailureThroughAMapLayeredOnTopOfMapToResultTransformsTheCaughtResult() {
+        val boom = IllegalStateException("boom")
+        val effect = RawFetch(1).mapToResult().map { result -> result.isFailure }
+        assertEquals(true, effect.completePristineFailure(boom))
+    }
 }

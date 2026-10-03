@@ -13,6 +13,7 @@ import statoscope.core.ScopeConfig
 import statoscope.core.StatoscopeInternalApi
 import statoscope.core.SuperstateKey
 import statoscope.core.completePristine
+import statoscope.core.completePristineFailure
 import statoscope.core.pristine
 
 /**
@@ -142,6 +143,26 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
             val found = lastEnqueuedEffects.firstOrNull { effectType.isInstance(it.pristine()) }
                 ?: error("onEffectCompletes(${effectType.simpleName}): no matching enqueued effect")
             dispatch(found.completePristine(pristineResult))
+        }
+    }
+
+    /**
+     * Same as [onEffectCompletes], but simulates [effectType]'s pristine effect THROWING
+     * [thrownError] instead of succeeding — replayed through its real `.map()`/`.mapToResult()`
+     * chain via [completePristineFailure], never a tester-guessed final [When] value. Mirrors
+     * Swift's `WHEN_EffectFails`. **Throws [thrownError] itself** if nothing in that effect's
+     * chain actually catches it (no `mapToResult()` anywhere between the pristine effect and the
+     * enqueue site) — same as a real failure would do in that shape.
+     */
+    @OptIn(StatoscopeInternalApi::class)
+    fun <EffectType : Effect<*>> onEffectFails(
+        effectType: KClass<EffectType>,
+        thrownError: Throwable
+    ): TestPlan<State, When> = apply {
+        steps += {
+            val found = lastEnqueuedEffects.firstOrNull { effectType.isInstance(it.pristine()) }
+                ?: error("onEffectFails(${effectType.simpleName}): no matching enqueued effect")
+            dispatch(found.completePristineFailure(thrownError))
         }
     }
 

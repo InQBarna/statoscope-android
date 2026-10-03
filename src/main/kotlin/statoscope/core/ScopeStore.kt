@@ -123,6 +123,18 @@ interface ScopeStore<State, When> {
      */
     @StatoscopeInternalApi
     fun completeEffect(effectType: KClass<out Effect<*>>, pristineResult: Any?): Boolean
+
+    /**
+     * Same as [completeEffect], but simulates [effectType]'s pristine effect THROWING [error]
+     * instead of succeeding — replayed through its real `.map()`/`.mapToResult()` chain via
+     * [completePristineFailure], never running [Effect.run] for real. Mirrors Swift's
+     * `WHEN_EffectFails<EffectType>`. Returns `false`, sending nothing, when no pending effect
+     * matches. **Throws [error] itself**, to the caller, if nothing in that effect's chain
+     * actually catches it (no `mapToResult()` anywhere between the pristine effect and the
+     * enqueue site) — same as a real failure would do in that shape: propagate all the way out.
+     */
+    @StatoscopeInternalApi
+    fun completeEffectWithFailure(effectType: KClass<out Effect<*>>, error: Throwable): Boolean
 }
 
 /**
@@ -309,6 +321,16 @@ private class ScopeStoreImpl<State, When>(
         runningEffects.remove(found.key)
         found.value.job?.cancel()
         send(found.value.enqueued.completePristine(pristineResult) as When)
+        return true
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Synchronized
+    override fun completeEffectWithFailure(effectType: KClass<out Effect<*>>, error: Throwable): Boolean {
+        val found = runningEffects.entries.firstOrNull { effectType.isInstance(it.value.pristine) } ?: return false
+        runningEffects.remove(found.key)
+        found.value.job?.cancel()
+        send(found.value.enqueued.completePristineFailure(error) as When)
         return true
     }
 
