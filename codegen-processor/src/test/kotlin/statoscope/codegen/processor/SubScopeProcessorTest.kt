@@ -118,6 +118,46 @@ object TestInjectedReducer {
         }
 }
 
+// Verifies a scenario the original @ReducerInjected tests (above) never exercised: the key
+// injected only at the ROOT, a @ReducerInjected property two levels... one level down, on a real
+// @SubState child, through the generated update() wrapper's own dependencies.resolve(key) call
+// — which already ancestor-walks (see ScopeStoreTest's own InjectionKey tests) — rather than on
+// an isolated, uncomposed reducer. Flagged by this session's test-level parity audit as "likely
+// already works by construction, but unverified."
+@Reducer
+object TestInjectedChildReducer {
+    data class State(
+        @ReducerInjected("TestLoggerKey") val logger: String = TestLoggerKey.defaultValue,
+        val tick: Int = 0
+    )
+
+    sealed interface When {
+        data object Tick : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            // Deliberately never touches `logger` — same point as TestInjectedReducer's own Increment.
+            is When.Tick -> state.copy(tick = state.tick + 1)
+        }
+}
+
+@Reducer
+object TestInjectedParentReducer {
+    data class State(
+        @SubState val child: TestInjectedChildReducer.State? = null
+    )
+
+    sealed interface When {
+        data object CreateChild : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.CreateChild -> state.copy(child = TestInjectedChildReducer.State())
+        }
+}
+
 class SubScopeProcessorTest {
 
     @Test
@@ -169,5 +209,29 @@ class SubScopeProcessorTest {
 
         assertEquals("injected-logger", store.state.logger)
         assertEquals(1, store.state.count)
+    }
+
+    @Test
+    fun testReducerInjectedResolvesThroughAComposedTreeWithTheKeyInjectedOnlyAtTheRoot() {
+        val root = createScope(TestInjectedParentReducer.config)
+        root.inject(TestLoggerKey, "injected-at-root")
+
+        root.send(TestInjectedParentReducer.When.CreateChild)
+        val child = root.childStore(testInjectedParentReducerChildSubScope)!!
+
+        // Before any event, the child holds its OWN default — not yet resolved from the tree
+        // (see ReducerInjected's own doc: re-stamped after update(), not continuously live).
+        assertEquals("default-logger", child.state.logger)
+
+        // Tick never touches `logger` itself — the generated wrapper is what re-stamps it, and
+        // dependencies.resolve(key) ancestor-walks all the way up to the root's own inject(),
+        // with zero plumbing at any level in between.
+        child.send(TestInjectedChildReducer.When.Tick)
+
+        assertEquals(
+            "injected-at-root", child.state.logger,
+            "a @ReducerInjected property on a composed child should resolve an ancestor's " +
+                "inject()/provide, exactly like a plain dependencies.resolve(key) call would"
+        )
     }
 }
