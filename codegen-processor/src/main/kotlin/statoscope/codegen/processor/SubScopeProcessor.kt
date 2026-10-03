@@ -53,6 +53,8 @@ class SubScopeProcessor(
 
     private data class ReducerInjectedSlot(val propertyName: String, val keyName: String)
 
+    private data class ParentStateSlot(val propertyName: String, val parentReducer: ReducerInfo)
+
     override fun process(resolver: Resolver): List<KSAnnotated> {
         val reducerObjects = resolver.getSymbolsWithAnnotation("statoscope.codegen.Reducer")
             .filterIsInstance<KSClassDeclaration>()
@@ -62,10 +64,41 @@ class SubScopeProcessor(
         val reducers = reducerObjects.mapNotNull { validate(it) }
         val byStateFqName = reducers.associateBy { it.stateFqName }
 
-        // Pass 2: generate, now that every reducer's identity is known.
-        reducers.forEach { reducer -> generateConfig(reducer, byStateFqName) }
+        // Pass 1.5: who's each reducer's real direct parent (if any) — every OTHER reducer's
+        // own @SubState properties, matched the same way resolveSlot validates them, but without
+        // re-emitting errors here (resolveSlot's own call, per-reducer in generateConfig, is the
+        // one place that reports those). Then resolve @ParentState exactly ONCE per reducer —
+        // memoized here, not recomputed per caller, so a malformed @ParentState property is
+        // reported once, not once per place that looks it up (itself, and any parent checking
+        // whether to wire a superstateKey for it).
+        val childToParent = buildChildToParentMap(reducers, byStateFqName)
+        val parentStateSlotByChildStateFqName = reducers.associate { reducer ->
+            reducer.stateFqName to resolveParentStateSlot(reducer, childToParent)
+        }
+
+        // Pass 2: generate, now that every reducer's identity (and @ParentState wiring) is known.
+        reducers.forEach { reducer -> generateConfig(reducer, byStateFqName, parentStateSlotByChildStateFqName) }
 
         return emptyList()
+    }
+
+    /** Best-effort, non-erroring: a malformed `@SubState` property is reported once, by
+     *  [resolveSlot], when its own reducer is generated — this is only building a lookup. */
+    private fun buildChildToParentMap(
+        reducers: List<ReducerInfo>,
+        byStateFqName: Map<String, ReducerInfo>
+    ): Map<String, ReducerInfo> {
+        val result = mutableMapOf<String, ReducerInfo>()
+        for (parent in reducers) {
+            for (property in parent.stateClass.getDeclaredProperties()) {
+                if (property.annotations.none { it.shortName.asString() == "SubState" }) continue
+                val childStateFqName = (property.type.resolve().declaration as? KSClassDeclaration)
+                    ?.qualifiedName?.asString() ?: continue
+                val childReducer = byStateFqName[childStateFqName] ?: continue
+                result[childReducer.stateFqName] = parent
+            }
+        }
+        return result
     }
 
     private fun validate(declaration: KSClassDeclaration): ReducerInfo? {
@@ -100,7 +133,11 @@ class SubScopeProcessor(
         return ReducerInfo(declaration = declaration, stateClass = stateClass, whenClass = whenClass)
     }
 
-    private fun generateConfig(reducer: ReducerInfo, byStateFqName: Map<String, ReducerInfo>) {
+    private fun generateConfig(
+        reducer: ReducerInfo,
+        byStateFqName: Map<String, ReducerInfo>,
+        parentStateSlotByChildStateFqName: Map<String, ParentStateSlot?>
+    ) {
         val reducerName = reducer.declaration.simpleName.asString()
         val stateName = "$reducerName.State"
         val whenName = "$reducerName.When"
@@ -113,6 +150,18 @@ class SubScopeProcessor(
 
         val onChildActionsByChildStateFqName = resolveOnChildActions(reducer, byStateFqName)
         val reducerInjectedSlots = resolveReducerInjectedSlots(reducer)
+        val ownParentStateSlot = parentStateSlotByChildStateFqName[reducer.stateFqName]
+
+        // This reducer's own SuperstateKey<State> — generated here, in ITS OWN file, only if at
+        // least one @SubState child actually declared @ParentState pointing back at it. Same
+        // naming convention wherever it's referenced from (here, and from each such child's own
+        // generated update() wrapper below) — a pure function of this reducer's name, so no
+        // cross-file lookup is needed to agree on the name, only on whether to emit the `val`
+        // itself (only this, the parent's own file, does that).
+        val superstateKeyName = "${reducerName.replaceFirstChar { it.lowercase() }}SuperstateKey"
+        val slotsNeedingSuperstateKey = slots.filter { slot ->
+            parentStateSlotByChildStateFqName[slot.childReducer.stateFqName]?.parentReducer?.stateFqName == reducer.stateFqName
+        }.toSet()
 
         // Each SubScope is its own stable, eagerly-initialized top-level `val` — NOT built
         // inline inside subScopes' listOf(...) — because ScopeStore.childStore(subScope) looks
@@ -131,6 +180,7 @@ class SubScopeProcessor(
             val onChildAction = onChildActionsByChildStateFqName[slot.childReducer.stateFqName]
                 ?.let { functionName -> "$reducerName::$functionName" }
                 ?: "null"
+            val superstateKeyArg = if (slot in slotsNeedingSuperstateKey) superstateKeyName else "null"
             """
             |val ${subScopeValNames.getValue(slot)}: SubScope<$stateName, $whenName, $childStateName, $childWhenName> =
             |    SubScope(
@@ -138,7 +188,7 @@ class SubScopeProcessor(
             |        get = { it.${slot.propertyName} },
             |        set = { state, child -> state.copy(${slot.propertyName} = child) },
             |        onChildAction = $onChildAction,
-            |        superstateKey = null
+            |        superstateKey = $superstateKeyArg
             |    )
             """.trimMargin()
         }
@@ -149,19 +199,36 @@ class SubScopeProcessor(
             "listOf(${slots.joinToString(", ") { subScopeValNames.getValue(it) }})"
         }
 
-        // No @ReducerInjected properties: keep the plain function reference, unchanged from
-        // before this feature existed. With at least one, wrap it in a lambda that re-stamps
-        // each one from `dependencies` right after the user's own update() returns — see
-        // ReducerInjected's own doc for why this is "fresh as of the last update()," not
-        // continuously live on every read.
-        val updateBody = if (reducerInjectedSlots.isEmpty()) {
+        val superstateKeyDeclaration = if (slotsNeedingSuperstateKey.isEmpty()) {
+            ""
+        } else {
+            "val $superstateKeyName: SuperstateKey<$stateName> = SuperstateKey(\"$reducerName\")\n\n"
+        }
+
+        // No @ReducerInjected/@ParentState properties: keep the plain function reference,
+        // unchanged from before either feature existed. With at least one, wrap it in a lambda
+        // that re-stamps each one from `dependencies` right after the user's own update()
+        // returns — see ReducerInjected's/ParentState's own docs for why this is "fresh as of
+        // the last update()," not continuously live on every read.
+        val copyAssignments = buildList {
+            reducerInjectedSlots.forEach { slot -> add("${slot.propertyName} = dependencies.resolve(${slot.keyName})") }
+            ownParentStateSlot?.let { slot ->
+                val parentReducerName = slot.parentReducer.declaration.simpleName.asString()
+                val parentKeyName = "${parentReducerName.replaceFirstChar { it.lowercase() }}SuperstateKey"
+                add("${slot.propertyName} = dependencies.resolve($parentKeyName)")
+            }
+        }
+        val updateBody = if (copyAssignments.isEmpty()) {
             "$reducerName::update"
         } else {
-            val copyArgs = reducerInjectedSlots.joinToString(", ") { slot ->
-                "${slot.propertyName} = dependencies.resolve(${slot.keyName})"
-            }
             "{ state, action, effects, dependencies -> " +
-                "$reducerName.update(state, action, effects, dependencies).copy($copyArgs) }"
+                "$reducerName.update(state, action, effects, dependencies).copy(${copyAssignments.joinToString(", ")}) }"
+        }
+
+        val superstateKeyImport = if (slotsNeedingSuperstateKey.isNotEmpty() || ownParentStateSlot != null) {
+            "import statoscope.core.SuperstateKey\n"
+        } else {
+            ""
         }
 
         val file = codeGenerator.createNewFile(
@@ -178,8 +245,8 @@ class SubScopeProcessor(
                 |
                 |import statoscope.core.ScopeConfig
                 |import statoscope.core.SubScope
-                |
-                |$subScopeDeclarations
+                |$superstateKeyImport
+                |$superstateKeyDeclaration$subScopeDeclarations
                 |
                 |val $reducerName.config: ScopeConfig<$stateName, $whenName>
                 |    get() = ScopeConfig(
@@ -220,6 +287,50 @@ class SubScopeProcessor(
                 ReducerInjectedSlot(propertyName = property.simpleName.asString(), keyName = keyName)
             }
             .toList()
+
+    /**
+     * Matches `@ParentState` by TYPE, like [resolveSlot] does for `@SubState` — no string-named
+     * workaround needed the way [resolveReducerInjectedSlots] needs one for `@ReducerInjected`,
+     * since the property's own declared type names a real `@Reducer`'s `State` directly. Real
+     * compile errors, pointing at the property, for: more than one `@ParentState` property on
+     * the same reducer (a reducer has exactly one direct parent), a reducer with no known parent
+     * at all (never composed as any other reducer's `@SubState` child), or a property typed as
+     * something other than that real parent's own `State`.
+     */
+    private fun resolveParentStateSlot(reducer: ReducerInfo, childToParent: Map<String, ReducerInfo>): ParentStateSlot? {
+        val annotated = reducer.stateClass.getDeclaredProperties()
+            .filter { property -> property.annotations.any { it.shortName.asString() == "ParentState" } }
+            .toList()
+        if (annotated.isEmpty()) return null
+        if (annotated.size > 1) {
+            logger.error(
+                "@Reducer object '${reducer.declaration.simpleName.asString()}' has more than one " +
+                    "@ParentState property — only one is allowed, since a reducer has exactly one direct parent",
+                reducer.declaration
+            )
+            return null
+        }
+        val property = annotated.single()
+        val parentReducer = childToParent[reducer.stateFqName]
+        if (parentReducer == null) {
+            logger.error(
+                "@ParentState on '${property.simpleName.asString()}': '${reducer.declaration.simpleName.asString()}' " +
+                    "isn't declared as any other @Reducer's @SubState child, so it has no parent to read",
+                property
+            )
+            return null
+        }
+        val propertyTypeFqName = (property.type.resolve().declaration as? KSClassDeclaration)?.qualifiedName?.asString()
+        if (propertyTypeFqName != parentReducer.stateFqName) {
+            logger.error(
+                "@ParentState property '${property.simpleName.asString()}' must be typed as its real parent, " +
+                    "${parentReducer.declaration.simpleName.asString()}.State — got '${property.type.resolve()}'",
+                property
+            )
+            return null
+        }
+        return ParentStateSlot(propertyName = property.simpleName.asString(), parentReducer = parentReducer)
+    }
 
     private fun resolveSlot(property: KSPropertyDeclaration, byStateFqName: Map<String, ReducerInfo>): ChildSlot? {
         val propertyType = property.type.resolve()

@@ -26,7 +26,10 @@ package statoscope.codegen
  *
  * Prefer `dependencies.resolve(key)` inside `update()` instead when the value is only ever
  * needed there — this exists for the same reason Swift's does: ambient access across the whole
- * `State`, for rendering/display logic that isn't itself inside `update()`.
+ * `State`, for rendering/display logic that isn't itself inside `update()`. That preference is
+ * not just style: because the re-stamp happens *after* `update()` returns, reading the annotated
+ * property from *inside* this reducer's own `update()` body always sees the PREVIOUS cycle's
+ * value, never the one being resolved for the call currently running.
  *
  * The property's own declared default (`= LoggerKey.defaultValue` above) is what the state holds
  * until the first `update()` call ever runs on this store; resolved fresh after every call from

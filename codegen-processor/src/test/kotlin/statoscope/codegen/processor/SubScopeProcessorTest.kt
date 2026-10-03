@@ -14,6 +14,7 @@ package statoscope.codegen.processor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import statoscope.codegen.OnChildAction
+import statoscope.codegen.ParentState
 import statoscope.codegen.Reducer
 import statoscope.codegen.ReducerInjected
 import statoscope.codegen.SubState
@@ -158,6 +159,50 @@ object TestInjectedParentReducer {
         }
 }
 
+// @ParentState — the real-world motivation: a leaf reading data a sibling level up (here,
+// `favorites`) actually owns, without the UI having to plumb it down by hand as an extra
+// parameter (the exact seam `statoscope-kotlin-examples`' NewsFeedArticleScreen/favoritesCount
+// has today). Matched by TYPE — no string-named workaround needed, unlike @ReducerInjected.
+@Reducer
+object TestParentStateChildReducer {
+    data class State(
+        @ParentState val parent: TestParentStateParentReducer.State = TestParentStateParentReducer.State()
+    )
+
+    sealed interface When {
+        // Deliberately a no-op in THIS reducer's own update() — see ParentState's own doc on
+        // timing: the generated wrapper re-stamps `parent` AFTER update() returns, so update()
+        // itself always sees the PREVIOUS cycle's value, never the one about to be resolved for
+        // the current call. Reading `state.parent` is for everything OUTSIDE update() — UI
+        // rendering, a later update() call — never within the same call that triggers the stamp.
+        data object Observe : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.Observe -> state
+        }
+}
+
+@Reducer
+object TestParentStateParentReducer {
+    data class State(
+        val favorites: List<String> = emptyList(),
+        @SubState val child: TestParentStateChildReducer.State? = null
+    )
+
+    sealed interface When {
+        data object CreateChild : When
+        data class AddFavorite(val id: String) : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.CreateChild -> state.copy(child = TestParentStateChildReducer.State())
+            is When.AddFavorite -> state.copy(favorites = state.favorites + action.id)
+        }
+}
+
 class SubScopeProcessorTest {
 
     @Test
@@ -232,6 +277,32 @@ class SubScopeProcessorTest {
             "injected-at-root", child.state.logger,
             "a @ReducerInjected property on a composed child should resolve an ancestor's " +
                 "inject()/provide, exactly like a plain dependencies.resolve(key) call would"
+        )
+    }
+
+    // MARK: - @ParentState
+
+    @Test
+    fun testParentStateResolvesTheParentsLiveStateAfterEveryChildUpdate() {
+        val root = createScope(TestParentStateParentReducer.config)
+        root.send(TestParentStateParentReducer.When.AddFavorite("a"))
+        root.send(TestParentStateParentReducer.When.AddFavorite("b"))
+        root.send(TestParentStateParentReducer.When.CreateChild)
+
+        val child = root.childStore(testParentStateParentReducerChildSubScope)!!
+
+        // Before any event, the child holds its own placeholder default — not yet resolved
+        // (same "fresh as of the last update()" rule as @ReducerInjected).
+        assertEquals(0, child.state.parent.favorites.size)
+
+        // Observe is a no-op in the child's own update() — the generated wrapper is what
+        // re-stamps `parent`, visible on this state only once this call returns.
+        child.send(TestParentStateChildReducer.When.Observe)
+
+        assertEquals(
+            listOf("a", "b"), child.state.parent.favorites,
+            "a @ParentState property should resolve the parent's CURRENT state via the " +
+                "generated superstateKey wiring, with no hand-written SubScope needed"
         )
     }
 }
