@@ -24,9 +24,6 @@ package statoscope.codegen
  *     )
  *     ...
  * }
- *
- * // Elsewhere — UI rendering, after update() has already returned:
- * ArticleScreen(state = articleState, favoritesCount = articleState.list.favorites.size, ...)
  * ```
  *
  * Mechanically, this generates the same two things a hand-written relationship would need: a
@@ -50,10 +47,25 @@ package statoscope.codegen
  * completes — UI rendering, a later `update()` call — never from within the same `update()` call
  * whose own action might have changed what it resolves to.
  *
+ * **A second, less obvious case of the same trap — confirmed on a real device, not just reasoned
+ * about**: `@ParentState` lags by one of THIS reducer's own cycles even for UI display, whenever
+ * the parent's data changes as a *side effect* of the very event reading it. E.g. a leaf's
+ * `UserTappedFavoriteButton` that [OnChildAction] delegates up as `ToggledFavorite`: this
+ * reducer's own `update()` runs (and the `@ParentState` wrapper re-stamps `list`) BEFORE
+ * `onChildAction` ever delegates anything — the parent's `favorites` hasn't changed yet at that
+ * point — and nothing re-triggers this reducer's own `update()` afterward to catch up once it
+ * has. The displayed count is then permanently one tap behind whatever its own taps just
+ * caused — toggle on, it still shows the old count; toggle off, it shows the count from the
+ * *previous* toggle, and so on. For data a view needs to show that changes this way, read it
+ * from the ANCESTOR's own state at the UI layer instead (already current there, with no resolve
+ * timing at all — see `statoscope.android.compose.ConnectedChild`) — never through a descendant's
+ * `@ParentState` property.
+ *
  * Reacting to the child's own events (rather than reading the parent's state) is still
  * [OnChildAction]'s job — delegate the action, inject the read: the two mechanisms are
  * independent and commonly used together, matching how the hand-written `SubScope.onChildAction`/
- * `superstateKey` pair already works.
+ * `superstateKey` pair already works. Just don't expect the injected read to already reflect
+ * what that same delegation is about to cause.
  */
 @Target(AnnotationTarget.PROPERTY)
 @Retention(AnnotationRetention.SOURCE)
