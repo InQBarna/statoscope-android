@@ -14,6 +14,7 @@ package statoscope.codegen.processor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import statoscope.codegen.OnChildAction
+import statoscope.codegen.ParentState
 import statoscope.codegen.Reducer
 import statoscope.codegen.ReducerInjected
 import statoscope.codegen.SubState
@@ -158,6 +159,50 @@ object TestInjectedParentReducer {
         }
 }
 
+// @ParentState — the real-world motivation: a leaf reading data a sibling level up (here,
+// `favorites`) actually owns, without the UI having to plumb it down by hand as an extra
+// parameter (the exact seam `statoscope-kotlin-examples`' NewsFeedArticleScreen/favoritesCount
+// has today). Matched by TYPE — no string-named workaround needed, unlike @ReducerInjected.
+@Reducer
+object TestParentStateChildReducer {
+    data class State(
+        @ParentState val parent: TestParentStateParentReducer.State = TestParentStateParentReducer.State()
+    )
+
+    sealed interface When {
+        // This reducer's own update() never touches `parent` at all — the generated
+        // liveAncestorKey/deriveFromLiveAncestor wiring (ScopeConfig.kt's own doc) is what keeps
+        // it current, pushed synchronously by ScopeStoreImpl the moment the parent commits a new
+        // state, including right at this child's own activation — never waiting for this
+        // reducer's own next update() the way the old re-stamp-after-update() approach did.
+        data object Observe : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.Observe -> state
+        }
+}
+
+@Reducer
+object TestParentStateParentReducer {
+    data class State(
+        val favorites: List<String> = emptyList(),
+        @SubState val child: TestParentStateChildReducer.State? = null
+    )
+
+    sealed interface When {
+        data object CreateChild : When
+        data class AddFavorite(val id: String) : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.CreateChild -> state.copy(child = TestParentStateChildReducer.State())
+            is When.AddFavorite -> state.copy(favorites = state.favorites + action.id)
+        }
+}
+
 class SubScopeProcessorTest {
 
     @Test
@@ -232,6 +277,47 @@ class SubScopeProcessorTest {
             "injected-at-root", child.state.logger,
             "a @ReducerInjected property on a composed child should resolve an ancestor's " +
                 "inject()/provide, exactly like a plain dependencies.resolve(key) call would"
+        )
+    }
+
+    // MARK: - @ParentState
+
+    @Test
+    fun testParentStateIsAlreadyCorrectAtActivationWithNoEventNeeded() {
+        val root = createScope(TestParentStateParentReducer.config)
+        root.send(TestParentStateParentReducer.When.AddFavorite("a"))
+        root.send(TestParentStateParentReducer.When.AddFavorite("b"))
+        root.send(TestParentStateParentReducer.When.CreateChild)
+
+        val child = root.childStore(testParentStateParentReducerChildSubScope)!!
+
+        // No event sent to the child at all — the generated liveAncestorKey/deriveFromLiveAncestor
+        // wiring pushes the parent's CURRENT state synchronously at activation, closing the
+        // "before any event, still holds the placeholder default" gap the old
+        // re-stamp-after-update() approach had.
+        assertEquals(
+            listOf("a", "b"), child.state.parent.favorites,
+            "a @ParentState property should already reflect the parent's current state right at " +
+                "activation, with no hand-written SubScope and no event needed"
+        )
+    }
+
+    @Test
+    fun testParentStatePushesANewFavoriteWithNoEventOnTheChildAtAll() {
+        val root = createScope(TestParentStateParentReducer.config)
+        root.send(TestParentStateParentReducer.When.CreateChild)
+        val child = root.childStore(testParentStateParentReducerChildSubScope)!!
+        assertEquals(emptyList(), child.state.parent.favorites)
+
+        // A later change at the PARENT, with no event sent to the child at all — the cascade
+        // (ScopeStoreImpl.notifyLiveDependents) pushes it straight through, proving @ParentState
+        // is genuinely live, not just resolved once at activation.
+        root.send(TestParentStateParentReducer.When.AddFavorite("c"))
+
+        assertEquals(
+            listOf("c"), child.state.parent.favorites,
+            "a @ParentState property should reflect a later parent-level change with no event " +
+                "sent to the child at all"
         )
     }
 }

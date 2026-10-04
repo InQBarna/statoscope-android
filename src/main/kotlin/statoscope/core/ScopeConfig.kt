@@ -65,6 +65,33 @@ data class ScopeConfig<State, When>(
     val subScopes: List<SubScope<State, When, *, *>> = emptyList(),
     val onDescendantAction: OnDescendantAction<State, When>? = null,
     /**
+     * Declares that this scope has a *live* dependency on [SuperstateKey] — paired with
+     * [deriveFromLiveAncestor], which re-derives this scope's own [State] from it. Together
+     * these replace the old, documented-as-stale approach of folding a [SuperstateKey] resolve
+     * into [update]'s own wrapper (still what `@ReducerInjected` does for [InjectionKey]s, since
+     * those don't change on their own the way an ancestor's state does): instead of waiting for
+     * this scope's *own* next `update()` to catch up, [ScopeStoreImpl] pushes a fresh value the
+     * moment the ancestor that owns [SuperstateKey] commits ANY new state of its own — including
+     * one caused by this scope's own event delegating upward through [SubScope.onChildAction],
+     * which is exactly the case the old approach permanently lagged on (see `@ParentState`'s own
+     * doc, written before this field existed, for the device-confirmed bug this closes).
+     *
+     * Both this and [deriveFromLiveAncestor] are generated together by `@ParentState` — there is
+     * no supported hand-written use outside codegen today, though nothing here is codegen-specific.
+     */
+    val liveAncestorKey: SuperstateKey<*>? = null,
+    /**
+     * Re-derives this scope's own [State] from fresh [Dependencies] — called by
+     * [ScopeStoreImpl], never by [update] — whenever [liveAncestorKey]'s owner commits a new
+     * state, and once more immediately at activation, before this scope has processed a single
+     * event of its own. Expected to do exactly one thing: `state.copy(theAnnotatedField =
+     * dependencies.resolve(liveAncestorKey))` — anything reading [liveAncestorKey] through
+     * [dependencies] here always gets the owner's true current value, never a cycle-stale one.
+     *
+     * `null` whenever [liveAncestorKey] is `null` — there's nothing to derive.
+     */
+    val deriveFromLiveAncestor: ((State, Dependencies) -> State)? = null,
+    /**
      * An event dispatched automatically, exactly once, right after a scope built from this
      * config is activated as a child (see [ScopeStoreImpl.activateChild]) — ports Swift's
      * `Reducer.defaultTrigger` (`Reducer.swift`): `static var defaultTrigger: When? { .onAppear }`.

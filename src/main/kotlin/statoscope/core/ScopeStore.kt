@@ -1,5 +1,6 @@
 package statoscope.core
 
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineDispatcher
@@ -10,6 +11,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.reflect.KClass
 
@@ -197,26 +199,53 @@ private class CombinedDependencies(
     override fun <T> resolve(key: InjectionKey<T>): T =
         if (ownInjection.hasOwnProvide(key)) ownInjection.resolve(key) else ancestorFallback.resolve(key)
     override fun <T> resolve(key: SuperstateKey<T>): T = ancestorFallback.resolve(key)
+
+    fun findSuperstateOwner(key: SuperstateKey<*>): ScopeStoreImpl<*, *>? = ancestorFallback.findSuperstateOwnerOrNull(key)
 }
 
 /**
- * Wraps [base], intercepting reads of exactly [key] with a fresh call to [liveGetter] — never a
- * cached value — and falling through to [base] for everything else, [InjectionKey]s included.
- * Built fresh, one layer per [SubScope.superstateKey], each time a child scope with one is
- * activated (see [ScopeStoreImpl.activateChild]) — since [base] is itself whatever the parent
+ * Wraps [base], intercepting reads of exactly [key] with a fresh read of [owner]'s own `state` —
+ * never a cached value — and falling through to [base] for everything else, [InjectionKey]s
+ * included. Built fresh, one layer per [SubScope.superstateKey], each time a child scope with one
+ * is activated (see [ScopeStoreImpl.activateChild]) — since [base] is itself whatever the parent
  * inherited, a chain of these is how a [SuperstateKey] declared several levels up stays
  * resolvable by a descendant several levels further down than the scope that declared it.
+ *
+ * [owner] is kept as a direct reference (not just a `() -> T` getter closure) so
+ * [findSuperstateOwner] can hand back the actual [ScopeStoreImpl] a descendant needs to register
+ * with for the live-push cascade (see [ScopeConfig.liveAncestorKey]) — the resolve path and the
+ * registration path both need to find the exact same owner, however many levels up it sits.
  */
 private class SuperstateDependencies<T>(
     private val base: Dependencies,
     private val key: SuperstateKey<T>,
-    private val liveGetter: () -> T
+    private val owner: ScopeStoreImpl<*, *>
 ) : Dependencies {
     override fun <U> resolve(key: InjectionKey<U>): U = base.resolve(key)
 
     @Suppress("UNCHECKED_CAST")
     override fun <U> resolve(key: SuperstateKey<U>): U =
-        if (key === this.key) liveGetter() as U else base.resolve(key)
+        if (key === this.key) owner.state as U else base.resolve(key)
+
+    fun findSuperstateOwner(key: SuperstateKey<*>): ScopeStoreImpl<*, *>? =
+        if (key === this.key) owner else base.findSuperstateOwnerOrNull(key)
+}
+
+/**
+ * Walks a [Dependencies] chain (see [SuperstateDependencies]/[CombinedDependencies]) to find the
+ * real [ScopeStoreImpl] that owns [key] — possibly several levels up from whatever scope holds
+ * this [Dependencies] instance (a skip-level [SuperstateKey], inherited unchanged through an
+ * intermediate [SubScope] that declares no `superstateKey` of its own). `null` when nothing on
+ * the chain declares [key] at all — the same "no ancestor provides this" case
+ * [NoAncestorDependencies]'s own `resolve` throws on, but a lookup here is allowed to just come
+ * back empty: a scope's own [ScopeConfig.liveAncestorKey] being wrong is a real codegen/config
+ * bug, but this function itself needs to stay total to be usable for the lookup that would
+ * *detect* that bug.
+ */
+private fun Dependencies.findSuperstateOwnerOrNull(key: SuperstateKey<*>): ScopeStoreImpl<*, *>? = when (this) {
+    is SuperstateDependencies<*> -> findSuperstateOwner(key)
+    is CombinedDependencies -> findSuperstateOwner(key)
+    else -> null
 }
 
 @OptIn(StatoscopeInternalApi::class)
@@ -267,6 +296,24 @@ private class ScopeStoreImpl<State, When>(
     // events via its own config.onDescendantAction, the runtime-broadcast counterpart to
     // SubScope.onChildAction's one-hop, compile-time-validated relay.
     private var parent: ScopeStoreImpl<*, *>? = null
+
+    // Callbacks THIS store owes a push to — one per descendant (at any depth) whose own
+    // config.liveAncestorKey names a SuperstateKey this store owns, registered in activateChild
+    // and removed in deactivateChild. CopyOnWriteArrayList, not a synchronized MutableList,
+    // deliberately: notifyLiveDependents() runs from inside process(), itself already inside
+    // send()'s own lock on THIS store — iterating a list guarded by a *different* lock (even this
+    // store's own, re-entered for the iteration) is exactly the kind of thing that could someday
+    // grow into a cross-thread lock-ordering deadlock the moment a callback does anything other
+    // than a lock-free write (see reDeriveFromLiveAncestor's own doc for the concrete scenario
+    // this is guarding against). A lock-free collection sidesteps the whole question.
+    private val liveDependents = CopyOnWriteArrayList<() -> Unit>()
+
+    // Set at activation time, only when config.liveAncestorKey is non-null — the exact callback
+    // to remove from the owner's own liveDependents when this store is torn down (deactivateChild).
+    // Keeping the closure itself (not just a flag) is what makes removal exact: CopyOnWriteArrayList.remove
+    // needs the same reference, not merely "some callback", in case several siblings or several
+    // descendants of the same owner are registered at once.
+    private var liveAncestorUnregister: (() -> Unit)? = null
 
     // Activates any child already non-null in `config.initial` — covers a parent whose own
     // update() populates a child's state with an already-non-null grandchild (or deeper) in one
@@ -382,6 +429,7 @@ private class ScopeStoreImpl<State, When>(
         }
         mutableStateFlow.value = newState
         syncSubScopes(previousState, newState)
+        notifyLiveDependents()
         notifyAncestors(action as Any, newState as Any)
 
         if (beforeDump != null) {
@@ -461,6 +509,55 @@ private class ScopeStoreImpl<State, When>(
         send(delegated as When)
     }
 
+    // Registration side of the live-ancestor cascade (see ScopeConfig.liveAncestorKey) — called
+    // on THIS store when it's the real owner of some descendant's key, from that descendant's own
+    // activateChild (possibly several levels down). Internal, not private: called from a
+    // *different* ScopeStoreImpl instance than `this`, same pattern childStore()/activateChild
+    // already establish for cross-instance access within this one file.
+    internal fun registerLiveDependent(callback: () -> Unit) {
+        liveDependents += callback
+    }
+
+    internal fun unregisterLiveDependent(callback: () -> Unit) {
+        liveDependents -= callback
+    }
+
+    // Called from process(), right after this store's own new state is committed — every
+    // registered descendant gets pushed a fresh, re-derived value synchronously, as part of THIS
+    // same call, not on its own schedule. Each callback closes over a specific descendant's own
+    // reDeriveFromLiveAncestor() (see activateChild) — iterating liveDependents itself never
+    // touches any lock, descendant or otherwise (see that field's own doc); only
+    // reDeriveFromLiveAncestor's lock-free MutableStateFlow.update keeps that true all the way
+    // through.
+    private fun notifyLiveDependents() {
+        liveDependents.forEach { it() }
+    }
+
+    // Re-derives THIS store's own state from config.deriveFromLiveAncestor, called two ways: once
+    // at activation (activateChild, before this store has processed a single event of its own —
+    // closes the OTHER half of @ParentState's old staleness bug, the one even before any tap),
+    // and every time the ancestor registerLiveDependent registered this callback with commits a
+    // new state of its own (via notifyLiveDependents, above).
+    //
+    // Deliberately NOT @Synchronized (does not acquire THIS store's own lock) — a real,
+    // cross-thread deadlock risk, not a theoretical one: send() already synchronizes on `this`,
+    // and the existing child-delegates-to-parent path (activateChild's own middleware,
+    // onChildAction) acquires a CHILD's lock first, then the PARENT's — exactly the opposite
+    // order this cascade would need (ANCESTOR's lock, already held via its own process(), THEN
+    // the descendant's) if this acquired a lock here. Two different threads — one delivering an
+    // effect completion into the ancestor, one delivering a UI event into the descendant that
+    // delegates back up — taking those two opposite orders concurrently is a textbook deadlock.
+    // MutableStateFlow.update {} is lock-free (CAS-based): no monitor acquired on this store at
+    // all, so no ordering to invert in the first place, at the cost of accepting that a genuinely
+    // concurrent send() on this exact store could still interleave with this write (the existing,
+    // already-accepted class of risk for any unsynchronized concurrent StateFlow write — not a
+    // new one this introduces).
+    internal fun reDeriveFromLiveAncestor() {
+        val derive = config.deriveFromLiveAncestor ?: return
+        mutableStateFlow.update { current -> derive(current, dependencies) }
+        notifyLiveDependents()
+    }
+
     // Runs after every state update, once per declared SubScope — a null→non-null transition on
     // its field activates a new child, non-null→null tears the current one down. A field that
     // stays non-null across the transition is left alone: the child's own store is the one
@@ -492,7 +589,7 @@ private class ScopeStoreImpl<State, When>(
         initial: ChildState
     ) {
         val superstateChain: Dependencies = subScope.superstateKey?.let { key ->
-            SuperstateDependencies(dependencies, key) { state }
+            SuperstateDependencies(dependencies, key, owner = this)
         } ?: dependencies
 
         val childStore = ScopeStoreImpl(
@@ -517,6 +614,48 @@ private class ScopeStoreImpl<State, When>(
             if (delegated != null) send(delegated)
         }
 
+        // The live-ancestor cascade's own registration (see ScopeConfig.liveAncestorKey): find
+        // the real owner — possibly several levels up, through a chain of inherited
+        // Dependencies — and register a callback with it, so every later state commit from that
+        // owner pushes straight into this child without waiting for the child's own next event.
+        // Run it once right here, too, synchronously, before defaultTrigger below ever fires —
+        // so this child's very first observable state already reflects the owner's true current
+        // value, never config.initial's own placeholder default.
+        //
+        // Critically, the push ALSO re-mirrors into THIS store's own field for it (the same
+        // subScope.set the middleware above performs on every real send()) — childStore's own
+        // mutableStateFlow isn't the only place a reader can observe this child's state from.
+        // ConnectedChild (statoscope.android.compose) deliberately reads a child through its
+        // DIRECT PARENT's own collected stateFlow (subScope.get(parentState)), not a second
+        // subscription on the child itself — exactly so one parent-level collectAsState() catches
+        // both "child created/destroyed" and "child's own state changed." Without re-mirroring
+        // here, reDeriveFromLiveAncestor's direct write would correct childStore.state (every
+        // ScopeStoreTest/NewsFeedTest assertion that reads the child store directly would still
+        // pass) while leaving THIS field of this store's own state — what a real app's UI
+        // actually renders through — showing the pre-cascade value: the exact gap that let the
+        // newsfeed app's on-device lag survive this cascade's first version even after its own
+        // unit tests went green.
+        //
+        // mutableStateFlow.update {}, not a synchronized assignment, for the same reason
+        // reDeriveFromLiveAncestor's own write is lock-free: this runs from inside the OWNER's
+        // notifyLiveDependents (see below), on the OWNER's own thread — for a skip-level owner,
+        // `this` is a DIFFERENT instance (an intermediate ancestor) than that owner, and
+        // synchronizing on it here would be the exact ancestor-acquires-descendant's-lock
+        // ordering reDeriveFromLiveAncestor's own doc explains is a real cross-thread deadlock
+        // risk against the existing child-delegates-up path.
+        childStore.config.liveAncestorKey?.let { key ->
+            val owner = childStore.dependencies.findSuperstateOwnerOrNull(key)
+            val pushAndMirror = {
+                childStore.reDeriveFromLiveAncestor()
+                mutableStateFlow.update { current -> subScope.set(current, childStore.state) }
+            }
+            if (owner != null) {
+                owner.registerLiveDependent(pushAndMirror)
+                childStore.liveAncestorUnregister = { owner.unregisterLiveDependent(pushAndMirror) }
+            }
+            pushAndMirror()
+        }
+
         activeChildren[subScope] = childStore
 
         // See ScopeConfig.defaultTrigger's own doc for exactly what fires and when (every
@@ -527,7 +666,10 @@ private class ScopeStoreImpl<State, When>(
 
     private fun <ChildState, ChildWhen> deactivateChild(subScope: SubScope<State, When, ChildState, ChildWhen>) {
         val removed = activeChildren.remove(subScope)
-        (removed as? ScopeStoreImpl<*, *>)?.cancelAllRunningEffectsRecursively()
+        (removed as? ScopeStoreImpl<*, *>)?.let { child ->
+            child.cancelAllRunningEffectsRecursively()
+            child.liveAncestorUnregister?.invoke()
+        }
     }
 
     // Called on a child store right as it's torn down (see deactivateChild) — without this, a
