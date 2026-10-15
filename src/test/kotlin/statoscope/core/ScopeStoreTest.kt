@@ -21,6 +21,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -136,6 +137,41 @@ private val parentWithChildConfig = ScopeConfig<ParentWithChildState, ParentWith
         }
     },
     subScopes = listOf(childSubScope)
+)
+
+// A second, sibling child slot sharing TestState/TestWhen (the same child type) — so
+// childStore()'s per-SubScope-reference identity lookup is actually exercised against a real
+// collision risk, not just assumed safe. Mirrors Swift Statoscope's own
+// testSiblingSlotsOfTheSameChildReducerTypeResolveIndependently (ReducerKeyPathTests.swift),
+// which proves the equivalent for ReducerKeyPath's per-property (not per-type) keying.
+private data class TwoSameTypeSiblingsState(val first: TestState? = null, val second: TestState? = null)
+
+private sealed interface TwoSameTypeSiblingsWhen {
+    data object ActivateFirst : TwoSameTypeSiblingsWhen
+    data object ActivateSecond : TwoSameTypeSiblingsWhen
+}
+
+private val firstSiblingSubScope = SubScope<TwoSameTypeSiblingsState, TwoSameTypeSiblingsWhen, TestState, TestWhen>(
+    config = testConfig,
+    get = { it.first },
+    set = { state, child -> state.copy(first = child) }
+)
+
+private val secondSiblingSubScope = SubScope<TwoSameTypeSiblingsState, TwoSameTypeSiblingsWhen, TestState, TestWhen>(
+    config = testConfig,
+    get = { it.second },
+    set = { state, child -> state.copy(second = child) }
+)
+
+private val twoSameTypeSiblingsConfig = ScopeConfig<TwoSameTypeSiblingsState, TwoSameTypeSiblingsWhen>(
+    initial = TwoSameTypeSiblingsState(),
+    update = { state, action, _, _ ->
+        when (action) {
+            is TwoSameTypeSiblingsWhen.ActivateFirst -> state.copy(first = TestState())
+            is TwoSameTypeSiblingsWhen.ActivateSecond -> state.copy(second = TestState())
+        }
+    },
+    subScopes = listOf(firstSiblingSubScope, secondSiblingSubScope)
 )
 
 private sealed interface QueryWhen {
@@ -1327,6 +1363,18 @@ class ScopeStoreTest {
             listOf("after-deactivation"), secondChild.state.parentFavorites,
             "a freshly (re)activated child should see the owner's current value, with no " +
                 "leftover registration from the previous (deactivated) child interfering"
+        )
+    }
+
+    @Test
+    fun testSiblingSlotsOfTheSameChildTypeResolveIndependently() {
+        val store = createScope(twoSameTypeSiblingsConfig)
+        store.send(TwoSameTypeSiblingsWhen.ActivateFirst)
+
+        assertNotNull(store.childStore(firstSiblingSubScope))
+        assertNull(
+            store.childStore(secondSiblingSubScope),
+            "a same-type sibling slot must not resolve the other slot's store"
         )
     }
 }
