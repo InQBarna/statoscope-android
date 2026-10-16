@@ -427,8 +427,28 @@ private class ScopeStoreImpl<State, When>(
             StatoscopeLogger.log(LogLevel.Errors, logPrefix) { "‼️ Exception on send: $error" }
             throw error
         }
+        // Split in two passes around the stateFlow publish below, not run as one
+        // syncSubScopes(...) call the way this used to read: a newly-activated child must exist
+        // in activeChildren BEFORE any collector of stateFlow can observe newState (where its
+        // field just went non-null) — otherwise a collector resumed synchronously inline on this
+        // same call stack (confirmed via :android's ConnectedScreenTest.kt Molecule-driven tests, using
+        // UnconfinedTestDispatcher — the same inline-resume shape kotlinx-coroutines-android's
+        // Dispatchers.Main.immediate uses whenever send() is already called from the main
+        // thread) sees childStore(subScope) return null for a child whose own state field is
+        // already non-null, and nothing ever triggers a further recomposition to correct it,
+        // since newState's own value never changes again on its own. Deactivation doesn't have
+        // this hazard — ConnectedChild checks subScope.get(parentState) first and never reaches
+        // childStore(subScope) once that's null — so removal can stay a single pass, after
+        // publish, same as before.
+        //
+        // The finishing half (installing each new child's middleware, the live-ancestor push,
+        // defaultTrigger) stays AFTER the publish, deliberately: that logic recursively calls
+        // back into this store (onChildAction delegation, notifyAncestors) expecting `state` —
+        // mutableStateFlow.value — to already be newState, exactly as it did before this split.
+        val finishActivations = preActivateNewChildren(previousState, newState)
         mutableStateFlow.value = newState
-        syncSubScopes(previousState, newState)
+        finishActivations.forEach { finish -> finish() }
+        deactivateRemovedChildren(previousState, newState)
         notifyLiveDependents()
         notifyAncestors(action as Any, newState as Any)
 
@@ -558,36 +578,69 @@ private class ScopeStoreImpl<State, When>(
         notifyLiveDependents()
     }
 
-    // Runs after every state update, once per declared SubScope — a null→non-null transition on
-    // its field activates a new child, non-null→null tears the current one down. A field that
-    // stays non-null across the transition is left alone: the child's own store is the one
-    // source of truth for its state while active (see activateChild's mirroring), so there's
-    // nothing to reconcile. A parent directly overwriting an already-active child's field with a
-    // different value (rather than through the child's own actions) isn't specially detected —
-    // a known, documented limitation, not a silently broken guarantee: nothing in any tutorial
-    // built so far needs it.
-    private fun syncSubScopes(previousState: State, newState: State) {
-        config.subScopes.forEach { subScope -> syncOne(subScope, previousState, newState) }
+    // One declared SubScope's non-null→null transition tears its current child down — see
+    // deactivateRemovedChildren below for the null→non-null half (activation), split out and run
+    // around the stateFlow publish in process() instead of alongside this.
+    private fun deactivateRemovedChildren(previousState: State, newState: State) {
+        config.subScopes.forEach { subScope -> deactivateOne(subScope, previousState, newState) }
     }
 
-    private fun <ChildState, ChildWhen> syncOne(
+    private fun <ChildState, ChildWhen> deactivateOne(
         subScope: SubScope<State, When, ChildState, ChildWhen>,
         previousState: State,
         newState: State
     ) {
         val previousChild = subScope.get(previousState)
         val currentChild = subScope.get(newState)
-        if (previousChild == null && currentChild != null) {
-            activateChild(subScope, currentChild)
-        } else if (previousChild != null && currentChild == null) {
+        if (previousChild != null && currentChild == null) {
             deactivateChild(subScope)
         }
+        // A field that stays non-null across the transition is left alone: the child's own store
+        // is the one source of truth for its state while active (see activateChild's mirroring),
+        // so there's nothing to reconcile. A parent directly overwriting an already-active
+        // child's field with a different value (rather than through the child's own actions)
+        // isn't specially detected — a known, documented limitation, not a silently broken
+        // guarantee: nothing in any tutorial built so far needs it.
     }
 
+    // The null→non-null half of syncing SubScopes — split from deactivateRemovedChildren (and
+    // from createChildAndRegister/finishActivatingChild below) so process() can register every
+    // newly-activated child in activeChildren BEFORE publishing newState to stateFlow, and only
+    // run each child's middleware install / live-ancestor push / defaultTrigger AFTER — see
+    // process()'s own comment for exactly why that ordering matters. Returns one no-arg closure
+    // per newly-activated child, to run in that second pass.
+    private fun preActivateNewChildren(previousState: State, newState: State): List<() -> Unit> =
+        config.subScopes.mapNotNull { subScope -> preActivateOne(subScope, previousState, newState) }
+
+    private fun <ChildState, ChildWhen> preActivateOne(
+        subScope: SubScope<State, When, ChildState, ChildWhen>,
+        previousState: State,
+        newState: State
+    ): (() -> Unit)? {
+        val previousChild = subScope.get(previousState)
+        val currentChild = subScope.get(newState) ?: return null
+        if (previousChild != null) return null
+        val childStore = createChildAndRegister(subScope, currentChild)
+        return { finishActivatingChild(subScope, childStore) }
+    }
+
+    // Activates a child already non-null in config.initial (a parent whose own update()
+    // populates a child's state — or a deeper descendant's — in one shot, rather than one level
+    // at a time) — see this store's init block. Nothing published to stateFlow yet at
+    // construction time for any collector to race with, so no split is needed here: create,
+    // register and finish in one call, same as this used to work for every activation.
     private fun <ChildState, ChildWhen> activateChild(
         subScope: SubScope<State, When, ChildState, ChildWhen>,
         initial: ChildState
     ) {
+        val childStore = createChildAndRegister(subScope, initial)
+        finishActivatingChild(subScope, childStore)
+    }
+
+    private fun <ChildState, ChildWhen> createChildAndRegister(
+        subScope: SubScope<State, When, ChildState, ChildWhen>,
+        initial: ChildState
+    ): ScopeStoreImpl<ChildState, ChildWhen> {
         val superstateChain: Dependencies = subScope.superstateKey?.let { key ->
             SuperstateDependencies(dependencies, key, owner = this)
         } ?: dependencies
@@ -598,7 +651,16 @@ private class ScopeStoreImpl<State, When>(
             inheritedDependencies = superstateChain
         )
         childStore.parent = this
+        // Registered here, as soon as the child exists — see preActivateNewChildren's own doc for
+        // why this has to happen before newState reaches stateFlow, not after.
+        activeChildren[subScope] = childStore
+        return childStore
+    }
 
+    private fun <ChildState, ChildWhen> finishActivatingChild(
+        subScope: SubScope<State, When, ChildState, ChildWhen>,
+        childStore: ScopeStoreImpl<ChildState, ChildWhen>
+    ) {
         // The one hook a child needs: forward first (child-first, no interception — see
         // SubScope's doc), then mirror its now-updated state back into this field of our own
         // state, then ask onChildAction whether this particular action should also become one of
@@ -655,8 +717,6 @@ private class ScopeStoreImpl<State, When>(
             }
             pushAndMirror()
         }
-
-        activeChildren[subScope] = childStore
 
         // See ScopeConfig.defaultTrigger's own doc for exactly what fires and when (every
         // activation, including an init-time pre-populated one) and what deliberately doesn't

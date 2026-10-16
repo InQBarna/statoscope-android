@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -1376,5 +1377,44 @@ class ScopeStoreTest {
             store.childStore(secondSiblingSubScope),
             "a same-type sibling slot must not resolve the other slot's store"
         )
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testActivatingAChildRegistersItBeforeStateFlowPublishesTheFieldGoingNonNull() = runTest(UnconfinedTestDispatcher()) {
+        val store = createScope(twoSameTypeSiblingsConfig)
+        var childStoreSeenAtPublishTime: Any? = Unit // Unit = "never observed the transition"
+        val collector = launch {
+            store.stateFlow.collect { state ->
+                if (state.first != null) {
+                    childStoreSeenAtPublishTime = store.childStore(firstSiblingSubScope)
+                }
+            }
+        }
+        advanceUntilIdle()
+
+        // UnconfinedTestDispatcher resumes a suspended collector inline, synchronously, the
+        // moment mutableStateFlow.value is set — the same inline-resume shape
+        // kotlinx-coroutines-android's Dispatchers.Main.immediate uses when send() is already
+        // called from the main thread (the common case). Without this dispatcher, a collector
+        // launched under the default StandardTestDispatcher only ever resumes later, well after
+        // activateChild has already finished — which would hide the exact race this guards
+        // against (see ConnectedScreenTest.kt in :android, which first caught it: ConnectedChild
+        // calling childStore(subScope) ?: return during a synchronous recomposition triggered by
+        // this same publish).
+        store.send(TwoSameTypeSiblingsWhen.ActivateFirst)
+        advanceUntilIdle()
+
+        assertNotNull(
+            childStoreSeenAtPublishTime,
+            "a collector resumed synchronously while stateFlow publishes the newly-activated " +
+                "child's field must already see childStore(subScope) non-null — not a transient " +
+                "window where the state says the child exists but activeChildren doesn't yet"
+        )
+        assertTrue(
+            childStoreSeenAtPublishTime !is Unit,
+            "the collector never even observed the first != null transition"
+        )
+        collector.cancel()
     }
 }
