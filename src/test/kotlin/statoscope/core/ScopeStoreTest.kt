@@ -230,12 +230,17 @@ private val effectConfig = ScopeConfig<TestState, TestWhen>(
 private data class BroadcastGrandchildState(val tapped: Boolean = false)
 private sealed interface BroadcastGrandchildWhen {
     data object Tap : BroadcastGrandchildWhen
+    // Mirrors Swift's ReducerUpdateSubstateErrorTests' .fail case — proves a descendant's
+    // thrown update() pre-empts onDescendantAction entirely, not just "runs it with stale data".
+    data object Fail : BroadcastGrandchildWhen
 }
+private class DeliberateBroadcastTestError : RuntimeException("deliberate test failure")
 private val broadcastGrandchildConfig = ScopeConfig<BroadcastGrandchildState, BroadcastGrandchildWhen>(
     initial = BroadcastGrandchildState(),
     update = { state, action, _, _ ->
         when (action) {
             is BroadcastGrandchildWhen.Tap -> state.copy(tapped = true)
+            is BroadcastGrandchildWhen.Fail -> throw DeliberateBroadcastTestError()
         }
     }
 )
@@ -1065,6 +1070,52 @@ class ScopeStoreTest {
         assertEquals(
             0, root.state.grandchildTapsSeenAtRoot,
             "a store's own self-sent event must never trigger its own onDescendantAction"
+        )
+    }
+
+    // TEST_PARITY_MAP.md #3 / Swift's ReducerUpdateSubstateErrorTests.
+    // testUpdateSubstateIsNotCalledWhenGrandchildThrows: a throwing descendant update() must
+    // pre-empt onDescendantAction entirely — not deliver it a partial/stale descendantState, not
+    // leave some ancestors notified and others not. Reading ScopeStoreImpl.process()/
+    // notifyAncestors first (per this item's own caution) showed WHY that's already true here,
+    // by construction, not by any explicit guard: config.update's throw happens before newState
+    // is even computed, so process() never reaches its own mutableStateFlow.value publish OR its
+    // notifyAncestors(...) call — both are later statements in the same function, and a Kotlin
+    // exception skips everything after the throw point, same function or not. The exception then
+    // unwinds through the grandchild's own installed middleware (finishActivatingChild) — skipping
+    // the parent-mirroring write and the middle level's own onChildAction, for the same reason —
+    // and is finally swallowed by the grandchild's own send() (matching every other store's
+    // documented at-the-boundary swallow). Net effect: a fully atomic no-op from the broadcast
+    // machinery's perspective, exactly what Swift's two tests prove. This test closes the gap by
+    // confirming it, not by changing any production code.
+    @Test
+    fun testOnDescendantActionDoesNotFireWhenTheDescendantsUpdateThrows() {
+        val root = createScope(broadcastRootConfig)
+        root.send(BroadcastRootWhen.ActivateMiddle)
+        val middle = root.childStore(broadcastRootMiddleSubScope)!!
+        middle.send(BroadcastMiddleWhen.ActivateGrandchild)
+        val grandchild = middle.childStore(broadcastMiddleGrandchildSubScope)!!
+
+        grandchild.send(BroadcastGrandchildWhen.Fail)
+
+        assertFalse(
+            grandchild.state.tapped,
+            "the throwing update() must not have committed any partial state of its own"
+        )
+        assertEquals(
+            0, root.state.grandchildTapsSeenAtRoot,
+            "a descendant's thrown exception must pre-empt onDescendantAction entirely, not just " +
+                "skip it after a partial commit"
+        )
+
+        // The failed send() must not have left the broadcast machinery (or this store's own
+        // middleware/send() plumbing) in a broken state — a normal event right after should
+        // still work exactly as before the failure.
+        grandchild.send(BroadcastGrandchildWhen.Tap)
+        assertTrue(grandchild.state.tapped, "a normal event after the failure should still apply")
+        assertEquals(
+            1, root.state.grandchildTapsSeenAtRoot,
+            "a normal event after the failure should still reach the root's onDescendantAction"
         )
     }
 
