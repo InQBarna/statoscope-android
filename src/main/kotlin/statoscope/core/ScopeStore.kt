@@ -578,9 +578,11 @@ private class ScopeStoreImpl<State, When>(
         notifyLiveDependents()
     }
 
-    // One declared SubScope's non-null→null transition tears its current child down — see
-    // deactivateRemovedChildren below for the null→non-null half (activation), split out and run
-    // around the stateFlow publish in process() instead of alongside this.
+    // One declared SubScope's non-null→null transition tears its current child down with no
+    // replacement — see preActivateNewChildren below for the other two cases this doesn't cover
+    // (a fresh null→non-null activation, and a non-null→different-non-null *reassignment*, which
+    // also tears the old child down but folds that into its own pre-publish pass instead — see
+    // its own doc for why).
     private fun deactivateRemovedChildren(previousState: State, newState: State) {
         config.subScopes.forEach { subScope -> deactivateOne(subScope, previousState, newState) }
     }
@@ -595,20 +597,33 @@ private class ScopeStoreImpl<State, When>(
         if (previousChild != null && currentChild == null) {
             deactivateChild(subScope)
         }
-        // A field that stays non-null across the transition is left alone: the child's own store
-        // is the one source of truth for its state while active (see activateChild's mirroring),
-        // so there's nothing to reconcile. A parent directly overwriting an already-active
-        // child's field with a different value (rather than through the child's own actions)
-        // isn't specially detected — a known, documented limitation, not a silently broken
-        // guarantee: nothing in any tutorial built so far needs it.
     }
 
-    // The null→non-null half of syncing SubScopes — split from deactivateRemovedChildren (and
-    // from createChildAndRegister/finishActivatingChild below) so process() can register every
-    // newly-activated child in activeChildren BEFORE publishing newState to stateFlow, and only
-    // run each child's middleware install / live-ancestor push / defaultTrigger AFTER — see
-    // process()'s own comment for exactly why that ordering matters. Returns one no-arg closure
-    // per newly-activated child, to run in that second pass.
+    // The "something new needs to exist" half of syncing SubScopes — a fresh null→non-null
+    // activation, OR a non-null→different-non-null *reassignment* (ports Swift's dirty-flag
+    // semantics: `MiddlewareReducerTests.testReassigningChildStateAlwaysCreatesNewStore` — ANY
+    // assignment to an already-active child's field discards its whole subtree and creates a
+    // genuinely new Store, even to a value that looks the same, never mutates the live one in
+    // place — see ReducerTests.testReassignChildStateDiscardsGrandchildren for the grandchild
+    // side of this). Reference inequality (`!==`), not structural (`!=`), is the direct Kotlin
+    // analog of Swift's dirty flag: a `data class.copy()` call that never touches this field
+    // keeps the exact same reference, while any explicit new value — even one that would compare
+    // structurally equal — is a fresh object. The only place that writes this field WITHOUT going
+    // through `process()` at all (a child mirroring its own state back up, or a live-ancestor
+    // push) always does so via `subScope.set(...)`'s own `.copy(...)`, itself a fresh reference
+    // each time — but those writes bypass `process()`/this comparison entirely (raw
+    // `mutableStateFlow` writes, not `send()`), so they can never accidentally trigger a
+    // reassignment-driven recreate of the very child that just mirrored into this field.
+    //
+    // Split from deactivateRemovedChildren so process() can register every new/replacement child
+    // in activeChildren BEFORE publishing newState to stateFlow, and only run each one's
+    // middleware install / live-ancestor push / defaultTrigger — plus, for a reassignment, the
+    // OLD child's teardown — AFTER, same as a fresh activation (see process()'s own comment for
+    // why). The old child's teardown can't simply reuse deactivateChild(subScope): by the time
+    // the after-publish pass would run, activeChildren[subScope] already points to the NEW child
+    // (registered here, in the pre-publish pass) — removing "whatever's under this key" at that
+    // point would tear down the new child instead. Captured up front, before the map entry is
+    // overwritten, and torn down directly by instance, not by key, in the returned closure.
     private fun preActivateNewChildren(previousState: State, newState: State): List<() -> Unit> =
         config.subScopes.mapNotNull { subScope -> preActivateOne(subScope, previousState, newState) }
 
@@ -619,9 +634,14 @@ private class ScopeStoreImpl<State, When>(
     ): (() -> Unit)? {
         val previousChild = subScope.get(previousState)
         val currentChild = subScope.get(newState) ?: return null
-        if (previousChild != null) return null
+        if (previousChild === currentChild) return null
+        @Suppress("UNCHECKED_CAST")
+        val replacedChildStore = activeChildren[subScope] as? ScopeStoreImpl<ChildState, ChildWhen>
         val childStore = createChildAndRegister(subScope, currentChild)
-        return { finishActivatingChild(subScope, childStore) }
+        return {
+            replacedChildStore?.let(::deactivateInstance)
+            finishActivatingChild(subScope, childStore)
+        }
     }
 
     // Activates a child already non-null in config.initial (a parent whose own update()
@@ -726,10 +746,16 @@ private class ScopeStoreImpl<State, When>(
 
     private fun <ChildState, ChildWhen> deactivateChild(subScope: SubScope<State, When, ChildState, ChildWhen>) {
         val removed = activeChildren.remove(subScope)
-        (removed as? ScopeStoreImpl<*, *>)?.let { child ->
-            child.cancelAllRunningEffectsRecursively()
-            child.liveAncestorUnregister?.invoke()
-        }
+        (removed as? ScopeStoreImpl<*, *>)?.let(::deactivateInstance)
+    }
+
+    // The by-instance half of tearing a child down — shared by deactivateChild (removed from
+    // activeChildren by key, the plain non-null→null case) and preActivateOne's own reassignment
+    // closure (which already overwrote the map entry with the replacement child, so it tears the
+    // old instance down directly, never by key — see preActivateOne's own doc).
+    private fun deactivateInstance(childStore: ScopeStoreImpl<*, *>) {
+        childStore.cancelAllRunningEffectsRecursively()
+        childStore.liveAncestorUnregister?.invoke()
     }
 
     // Called on a child store right as it's torn down (see deactivateChild) — without this, a

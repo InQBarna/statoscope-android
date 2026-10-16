@@ -21,6 +21,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -491,6 +492,12 @@ private val prePopulatedMiddleConfig = ScopeConfig<PrePopulatedMiddleState, PreP
 private data class PrePopulatedRootState(val middle: PrePopulatedMiddleState? = null)
 private sealed interface PrePopulatedRootWhen {
     data object CreateMiddleWithGrandchildAlreadyPresent : PrePopulatedRootWhen
+
+    // Ports Swift's dirty-flag semantics (`MiddlewareReducerTests.testReassigningChildStateAlwaysCreatesNewStore`,
+    // `ReducerTests.testReassignChildStateDiscardsGrandchildren`): a direct reassignment of an
+    // already-active child's field — not nulling it first, replacing it outright — to a brand
+    // new value, with no grandchild of its own this time.
+    data object ReassignMiddleToAFreshValue : PrePopulatedRootWhen
 }
 private val prePopulatedRootMiddleSubScope =
     SubScope<PrePopulatedRootState, PrePopulatedRootWhen, PrePopulatedMiddleState, PrePopulatedMiddleWhen>(
@@ -507,6 +514,8 @@ private val prePopulatedRootConfig = ScopeConfig<PrePopulatedRootState, PrePopul
                 // grandchild both come into existence at once, exactly the scenario Swift's
                 // _applyChildSlotsRecursively exists to handle.
                 state.copy(middle = PrePopulatedMiddleState(grandchild = PrePopulatedGrandchildState(value = "pre-populated")))
+            is PrePopulatedRootWhen.ReassignMiddleToAFreshValue ->
+                state.copy(middle = PrePopulatedMiddleState())
         }
     },
     subScopes = listOf(prePopulatedRootMiddleSubScope)
@@ -1197,6 +1206,49 @@ class ScopeStoreTest {
                 "update() call that created the child, not a separate later event) should have " +
                 "its own real ScopeStore activated too — Swift does this recursively at " +
                 "child-creation time (Store.swift's _applyChildSlotsRecursively)"
+        )
+    }
+
+    // MARK: - Reassigning an already-active child's field (test-parity audit findings 1 & 2)
+
+    @Test
+    fun testReassigningAnActiveChildDiscardsItsGrandchildren() {
+        val root = createScope(prePopulatedRootConfig)
+        root.send(PrePopulatedRootWhen.CreateMiddleWithGrandchildAlreadyPresent)
+        val originalMiddle = root.childStore(prePopulatedRootMiddleSubScope)!!
+        assertNotNull(
+            originalMiddle.childStore(prePopulatedMiddleGrandchildSubScope),
+            "sanity check: the grandchild should exist before the reassignment"
+        )
+
+        root.send(PrePopulatedRootWhen.ReassignMiddleToAFreshValue)
+        val replacementMiddle = root.childStore(prePopulatedRootMiddleSubScope)!!
+
+        assertNull(
+            replacementMiddle.childStore(prePopulatedMiddleGrandchildSubScope),
+            "reassigning a child discards its previous subtree outright — no grandchild " +
+                "migration — ports Swift's ReducerTests.testReassignChildStateDiscardsGrandchildren"
+        )
+    }
+
+    @Test
+    fun testReassigningAnActiveChildAlwaysCreatesANewStoreInstance() {
+        val root = createScope(prePopulatedRootConfig)
+        root.send(PrePopulatedRootWhen.CreateMiddleWithGrandchildAlreadyPresent)
+        val originalMiddle = root.childStore(prePopulatedRootMiddleSubScope)!!
+
+        root.send(PrePopulatedRootWhen.ReassignMiddleToAFreshValue)
+        val replacementMiddle = root.childStore(prePopulatedRootMiddleSubScope)!!
+
+        assertFalse(
+            originalMiddle === replacementMiddle,
+            "reassigning an already-active child's field must always produce a genuinely new " +
+                "Store, matching the field's new value, never mutate the live one in place — " +
+                "ports Swift's MiddlewareReducerTests.testReassigningChildStateAlwaysCreatesNewStore"
+        )
+        assertEquals(
+            PrePopulatedMiddleState(), replacementMiddle.state,
+            "the new store's own state should reflect the replacement value, not the old one"
         )
     }
 
