@@ -21,6 +21,17 @@ interface Dependencies {
      * [key] — there's no default to fall back to, unlike [InjectionKey].
      */
     fun <T> resolve(key: SuperstateKey<T>): T
+
+    /**
+     * Overrides [key] with [value] on the scope this `update()` is running in, from now on —
+     * exactly [ScopeStore.inject], reachable from inside `update()`. Ports Swift's
+     * `ReducerDependencies.inject(_:)`, the call a reducer makes once it learns a value its
+     * descendants need (e.g. `FeatureToggleReducer` injecting the loaded `FeatureToggle` before
+     * assigning a child). Inject **before** assigning a child's `@SubState` field in the same
+     * `update()`: the child's very first [resolve] already sees [value]. Already-active
+     * descendants see it on their next [resolve] too (nothing is snapshotted).
+     */
+    fun <T> inject(key: InjectionKey<T>, value: T)
 }
 
 /**
@@ -67,6 +78,8 @@ class MapDependencies(provide: List<Pair<InjectionKey<*>, Any?>>) : Dependencies
     override fun <T> resolve(key: InjectionKey<T>): T = synchronized(provided) {
         if (provided.containsKey(key)) provided[key] as T else key.defaultValue
     }
+
+    override fun <T> inject(key: InjectionKey<T>, value: T) = override(key, value)
 
     // A flat MapDependencies never has an ancestor of its own — [ScopeStoreImpl] is what wires
     // real SuperstateKey resolution when composing scopes (see ScopeStore.kt); reaching here at

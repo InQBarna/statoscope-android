@@ -63,12 +63,18 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
     // Read fresh each time a step actually runs, not when on()/then() was called — so calling
     // withProvide()/withSuperstate() any time before runTest() takes effect, regardless of call
     // order relative to on()/then().
+    // Built once, on the first step that runs — so an inject() made by one update() is still
+    // visible to the next step's resolve(), like on a real store.
+    private var runtimeBase: MapDependencies? = null
+
     private val dependencies: Dependencies
         get() {
-            val base = MapDependencies(provideOverride ?: config.provide)
+            val base = runtimeBase ?: MapDependencies(provideOverride ?: config.provide).also { runtimeBase = it }
             val overrides = superstateOverrides
             return object : Dependencies {
                 override fun <T> resolve(key: InjectionKey<T>): T = base.resolve(key)
+
+                override fun <T> inject(key: InjectionKey<T>, value: T) = base.inject(key, value)
 
                 @Suppress("UNCHECKED_CAST")
                 override fun <T> resolve(key: SuperstateKey<T>): T =
@@ -164,6 +170,14 @@ class TestPlan<State, When>(private val config: ScopeConfig<State, When>) {
                 ?: error("onEffectFails(${effectType.simpleName}): no matching enqueued effect")
             dispatch(found.completePristineFailure(thrownError))
         }
+    }
+
+    /**
+     * Asserts on what [key] resolves to right now — including a value an earlier step's `update()`
+     * put there via [Dependencies.inject].
+     */
+    fun <T> thenInjected(key: InjectionKey<T>, assertion: (T) -> Unit): TestPlan<State, When> = apply {
+        steps += { assertion(dependencies.resolve(key)) }
     }
 
     /** Run a custom assertion against the current state. */

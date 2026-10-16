@@ -179,6 +179,10 @@ private object NoAncestorDependencies : Dependencies {
     override fun <T> resolve(key: InjectionKey<T>): T = key.defaultValue
     override fun <T> resolve(key: SuperstateKey<T>): T =
         error("No ancestor provides $key — declare it via a SubScope's superstateKey.")
+    // Unreachable in practice: every real scope's chain starts with its own CombinedDependencies,
+    // which handles inject() itself before ever delegating here.
+    override fun <T> inject(key: InjectionKey<T>, value: T): Unit =
+        error("No scope to inject $key into.")
 }
 
 /**
@@ -199,6 +203,9 @@ private class CombinedDependencies(
     override fun <T> resolve(key: InjectionKey<T>): T =
         if (ownInjection.hasOwnProvide(key)) ownInjection.resolve(key) else ancestorFallback.resolve(key)
     override fun <T> resolve(key: SuperstateKey<T>): T = ancestorFallback.resolve(key)
+
+    // Same as ScopeStore.inject: this scope's own injection map, which children resolve through.
+    override fun <T> inject(key: InjectionKey<T>, value: T) = ownInjection.override(key, value)
 
     fun findSuperstateOwner(key: SuperstateKey<*>): ScopeStoreImpl<*, *>? = ancestorFallback.findSuperstateOwnerOrNull(key)
 }
@@ -222,6 +229,8 @@ private class SuperstateDependencies<T>(
     private val owner: ScopeStoreImpl<*, *>
 ) : Dependencies {
     override fun <U> resolve(key: InjectionKey<U>): U = base.resolve(key)
+
+    override fun <U> inject(key: InjectionKey<U>, value: U) = base.inject(key, value)
 
     @Suppress("UNCHECKED_CAST")
     override fun <U> resolve(key: SuperstateKey<U>): U =

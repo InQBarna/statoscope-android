@@ -1199,6 +1199,30 @@ class ScopeStoreTest {
         )
     }
 
+    @Test
+    fun testDependenciesInjectFromInsideUpdateIsSeenByTheSameStoresLaterResolves() {
+        val key = InjectionKey("default", "injectedFromUpdate")
+        val store = createScope(
+            ScopeConfig<String, String>(
+                initial = "",
+                update = { state, action, _, dependencies ->
+                    if (action == "inject") {
+                        dependencies.inject(key, "injected")
+                        state
+                    } else {
+                        dependencies.resolve(key)
+                    }
+                }
+            )
+        )
+
+        store.send("read")
+        assertEquals("default", store.state)
+        store.send("inject")
+        store.send("read")
+        assertEquals("injected", store.state, "inject() inside update() should behave like ScopeStore.inject")
+    }
+
     // MARK: - SuperstateKey (ancestor-tree live read)
 
     @Test
