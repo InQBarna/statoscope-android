@@ -13,7 +13,9 @@ package statoscope.codegen.processor
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import statoscope.codegen.OnChildAction
+import statoscope.codegen.OnDescendantAction
 import statoscope.codegen.ParentState
 import statoscope.codegen.Reducer
 import statoscope.codegen.ReducerInjected
@@ -203,6 +205,62 @@ object TestParentStateParentReducer {
         }
 }
 
+// @OnDescendantAction — three real levels (Root -> Middle -> Grandchild), proving the codegen path
+// can reach a GRANDCHILD directly from the ROOT with zero relay at the Middle level, mirroring
+// ScopeStoreTest's hand-written broadcastRootConfig fixture one-for-one.
+@Reducer
+object TestBroadcastGrandchildReducer {
+    data class State(val tapped: Boolean = false)
+
+    sealed interface When {
+        data object Tap : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.Tap -> state.copy(tapped = true)
+        }
+}
+
+@Reducer
+object TestBroadcastMiddleReducer {
+    // Deliberately NO @OnChildAction here — proving the root sees the grandchild's event with no
+    // relay from this level at all, not even an unconditional pass-through one.
+    data class State(@SubState val grandchild: TestBroadcastGrandchildReducer.State? = null)
+
+    sealed interface When {
+        data object ActivateGrandchild : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.ActivateGrandchild -> state.copy(grandchild = TestBroadcastGrandchildReducer.State())
+        }
+}
+
+@Reducer
+object TestBroadcastRootReducer {
+    data class State(
+        @SubState val middle: TestBroadcastMiddleReducer.State? = null,
+        val grandchildTapsSeenAtRoot: Int = 0
+    )
+
+    sealed interface When {
+        data object ActivateMiddle : When
+        data object RecordGrandchildTap : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.ActivateMiddle -> state.copy(middle = TestBroadcastMiddleReducer.State())
+            is When.RecordGrandchildTap -> state.copy(grandchildTapsSeenAtRoot = state.grandchildTapsSeenAtRoot + 1)
+        }
+
+    @OnDescendantAction
+    fun onAnyDescendantAction(descendantWhen: Any, descendantState: Any, parentState: State, dependencies: Dependencies): When? =
+        if (descendantWhen is TestBroadcastGrandchildReducer.When.Tap) When.RecordGrandchildTap else null
+}
+
 class SubScopeProcessorTest {
 
     @Test
@@ -318,6 +376,39 @@ class SubScopeProcessorTest {
             listOf("c"), child.state.parent.favorites,
             "a @ParentState property should reflect a later parent-level change with no event " +
                 "sent to the child at all"
+        )
+    }
+
+    // MARK: - @OnDescendantAction
+
+    @Test
+    fun testOnDescendantActionReachesAGrandchildWithNoRelayAtTheMiddleLevel() {
+        val root = createScope(TestBroadcastRootReducer.config)
+        root.send(TestBroadcastRootReducer.When.ActivateMiddle)
+        val middle = root.childStore(testBroadcastRootReducerMiddleSubScope)!!
+        middle.send(TestBroadcastMiddleReducer.When.ActivateGrandchild)
+        val grandchild = middle.childStore(testBroadcastMiddleReducerGrandchildSubScope)!!
+
+        grandchild.send(TestBroadcastGrandchildReducer.When.Tap)
+
+        assertTrue(grandchild.state.tapped, "the grandchild's own update() still ran normally")
+        assertEquals(
+            1, root.state.grandchildTapsSeenAtRoot,
+            "the generated @OnDescendantAction wiring should see the grandchild's event directly, " +
+                "with no relay anywhere on the middle level's generated SubScope"
+        )
+    }
+
+    @Test
+    fun testOnDescendantActionDoesNotFireForTheRootsOwnSelfSentEvents() {
+        val root = createScope(TestBroadcastRootReducer.config)
+
+        // ActivateMiddle is the root's OWN event, sent to itself — not a descendant's.
+        root.send(TestBroadcastRootReducer.When.ActivateMiddle)
+
+        assertEquals(
+            0, root.state.grandchildTapsSeenAtRoot,
+            "a store's own self-sent event must never trigger its own generated @OnDescendantAction"
         )
     }
 }

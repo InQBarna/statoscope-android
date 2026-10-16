@@ -151,6 +151,7 @@ class SubScopeProcessor(
         val onChildActionsByChildStateFqName = resolveOnChildActions(reducer, byStateFqName)
         val reducerInjectedSlots = resolveReducerInjectedSlots(reducer)
         val ownParentStateSlot = parentStateSlotByChildStateFqName[reducer.stateFqName]
+        val onDescendantActionName = resolveOnDescendantAction(reducer)
 
         // This reducer's own SuperstateKey<State> — generated here, in ITS OWN file, only if at
         // least one @SubState child actually declared @ParentState pointing back at it. Same
@@ -240,6 +241,10 @@ class SubScopeProcessor(
             ""
         }
 
+        val onDescendantActionField = onDescendantActionName?.let { name ->
+            ",\n        onDescendantAction = $reducerName::$name"
+        } ?: ""
+
         val file = codeGenerator.createNewFile(
             dependencies = Dependencies(aggregating = true, *reducerObjectsFiles(reducer, slots)),
             packageName = packageName,
@@ -261,7 +266,7 @@ class SubScopeProcessor(
                 |    get() = ScopeConfig(
                 |        initial = $stateName(),
                 |        update = $updateBody,
-                |        subScopes = $subScopesBody$liveAncestorFields
+                |        subScopes = $subScopesBody$liveAncestorFields$onDescendantActionField
                 |    )
                 |
                 """.trimMargin()
@@ -445,6 +450,103 @@ class SubScopeProcessor(
         }
 
         return result
+    }
+
+    /**
+     * Matches an `@OnDescendantAction`-annotated function on [reducer] — see that annotation's
+     * own doc for the full picture. Type-erased by design (a descendant can be any reducer at any
+     * depth, so the first two parameters have no single static type to require): validates the
+     * exact shape `(descendantWhen: Any, descendantState: Any, parentState: <Reducer>.State,
+     * dependencies: Dependencies) -> <Reducer>.When?`, matching
+     * [statoscope.core.OnDescendantAction]'s own typealias so the generated
+     * `ReducerName::functionName` reference satisfies
+     * [statoscope.core.ScopeConfig.onDescendantAction] with no wrapping lambda. Only one such
+     * function is allowed per reducer — unlike [resolveOnChildActions], there's no "which child"
+     * to key multiple functions by, since [statoscope.core.ScopeConfig.onDescendantAction] is a
+     * single nullable slot.
+     */
+    private fun resolveOnDescendantAction(reducer: ReducerInfo): String? {
+        val annotated = reducer.declaration.getDeclaredFunctions()
+            .filter { fn -> fn.annotations.any { it.shortName.asString() == "OnDescendantAction" } }
+            .toList()
+        if (annotated.isEmpty()) return null
+        if (annotated.size > 1) {
+            logger.error(
+                "@Reducer object '${reducer.declaration.simpleName.asString()}' has more than one " +
+                    "@OnDescendantAction function — only one is allowed, since ScopeConfig.onDescendantAction " +
+                    "is a single slot",
+                reducer.declaration
+            )
+            return null
+        }
+
+        val function = annotated.single()
+        val name = function.simpleName.asString()
+        val reducerName = reducer.declaration.simpleName.asString()
+        val params = function.parameters
+        if (params.size != 4) {
+            logger.error(
+                "@OnDescendantAction function '$name' must take exactly 4 parameters: " +
+                    "(descendantWhen: Any, descendantState: Any, parentState: $reducerName.State, " +
+                    "dependencies: Dependencies)",
+                function
+            )
+            return null
+        }
+
+        val descendantWhenFqName = (params[0].type.resolve().declaration as? KSClassDeclaration)?.qualifiedName?.asString()
+        if (descendantWhenFqName != "kotlin.Any") {
+            logger.error(
+                "@OnDescendantAction function '$name': first parameter must be Any (type-erased — matched " +
+                    "at runtime via 'is'/'as' checks, like Swift's updateSubstate<Child: Reducer>), " +
+                    "got '${describeType(params[0])}'",
+                function
+            )
+            return null
+        }
+
+        val descendantStateFqName = (params[1].type.resolve().declaration as? KSClassDeclaration)?.qualifiedName?.asString()
+        if (descendantStateFqName != "kotlin.Any") {
+            logger.error(
+                "@OnDescendantAction function '$name': second parameter must be Any (type-erased, same as " +
+                    "the first), got '${describeType(params[1])}'",
+                function
+            )
+            return null
+        }
+
+        val parentStateFqName = (params[2].type.resolve().declaration as? KSClassDeclaration)?.qualifiedName?.asString()
+        if (parentStateFqName != reducer.stateFqName) {
+            logger.error(
+                "@OnDescendantAction function '$name': third parameter must be this reducer's own " +
+                    "$reducerName.State, got '${describeType(params[2])}'",
+                function
+            )
+            return null
+        }
+
+        val dependenciesFqName = (params[3].type.resolve().declaration as? KSClassDeclaration)?.qualifiedName?.asString()
+        if (dependenciesFqName != "statoscope.core.Dependencies") {
+            logger.error(
+                "@OnDescendantAction function '$name': fourth parameter must be statoscope.core.Dependencies, " +
+                    "got '${describeType(params[3])}'",
+                function
+            )
+            return null
+        }
+
+        val returnType = function.returnType?.resolve()
+        val returnFqName = (returnType?.declaration as? KSClassDeclaration)?.qualifiedName?.asString()
+        if (returnType == null || returnFqName != reducer.whenFqName) {
+            logger.error(
+                "@OnDescendantAction function '$name' must return $reducerName.When (nullable or not) — " +
+                    "see the return type",
+                function
+            )
+            return null
+        }
+
+        return name
     }
 
     private fun describeType(parameter: KSValueParameter): String =

@@ -3,9 +3,9 @@
 An optional layer on top of Tutorial 05's hand-written `ScopeConfig`/`SubScope` — the Kotlin
 answer to "how do we get iOS's `@Reducer` macro ergonomics without a macro system." Two modules:
 
-- **`:codegen`** — `@Reducer`, `@SubState`, `@OnChildAction`. Pure marker annotations
-  (`SOURCE` retention), zero dependencies. A consuming module adds this to its normal compile
-  classpath.
+- **`:codegen`** — `@Reducer`, `@SubState`, `@OnChildAction`, `@OnDescendantAction`,
+  `@ReducerInjected`, `@ParentState`. Pure marker annotations (`SOURCE` retention), zero
+  dependencies. A consuming module adds this to its normal compile classpath.
 - **`:codegen-processor`** — a KSP `SymbolProcessor` reading those annotations and generating a
   `<Reducer>.config: ScopeConfig<State, When>` extension property, `SubScope` wiring included. A
   consuming module adds this to its `ksp(...)` configuration, never `implementation`.
@@ -89,24 +89,33 @@ reference identity — an extension `get()` property (or building `SubScope(...)
 silently rebuild a *different* instance on every access, breaking `childStore()` for any caller
 outside the generated file. Found and fixed during development, not a guess.
 
-**"Multi-level" responsiveness — a grandparent reacting to a grandchild's event — today needs an
-explicit relay, one level at a time.** An earlier version of this doc claimed this was "checked
-against the real Swift source" and that Swift's own `Store.swift` only ever delivers one
-direct-child event at a time too — **that claim was false**, and has since been corrected in two
-other places in this repo (`codegen/.../OnChildAction.kt`'s own doc comment, and
-`PARITY_AUDIT.md`'s Issue 7) but was never fixed here until now. Swift's
-`callParentEnclosedHierarchialUpdate`/`allHierarchialScopeMiddlewareParents`
-(`ScopeImplementation.swift`) actually **broadcast** the original, unmodified event to every
-`MiddlewareReducer`-conforming ancestor at any depth — a grandparent sees a grandchild's raw
-`When` type directly, no relay needed. Kotlin's `@OnChildAction` has no equivalent single generic
-dispatch point a broadcast could invoke uniformly; reaching a grandparent here means an
+**"Multi-level" responsiveness — a grandparent reacting to a grandchild's event — has two paths
+now, not one.** `@OnChildAction` alone still needs an explicit relay, one level at a time: an
 intermediate reducer's own `@OnChildAction` relays the child's event *unchanged*, wrapped as an
-associated value of its own `When`, and the level above matches into that wrapped value. This
-one-hop-plus-relay mechanism is real and proven end to end — a real `ScopeStore`, a `send()` on
-the leaf article store, and the root's own state reflecting it two levels up
-(`SubScopeProcessorTest.testGeneratedConfigWiresThreeRealLevelsWithZeroHandWrittenSubScopes`) —
-it just isn't Swift's broadcast. See `PARITY_AUDIT.md`'s Issue 7 for the full reasoning and the
-target of eventual broadcast reach on both platforms, not yet designed for Kotlin.
+associated value of its own `When`, and the level above matches into that wrapped value. Proven
+end to end — a real `ScopeStore`, a `send()` on the leaf article store, and the root's own state
+reflecting it two levels up
+(`SubScopeProcessorTest.testGeneratedConfigWiresThreeRealLevelsWithZeroHandWrittenSubScopes`).
+
+For genuine, Swift-style broadcast reach — a grandparent seeing a grandchild's raw event directly,
+with zero relay at any intermediate level — use **`@OnDescendantAction`** (added after
+`PARITY_AUDIT.md`'s Issue 7/`TEST_PARITY_MAP.md` closed the hand-written `ScopeConfig
+.onDescendantAction` field): mark one function per reducer with the type-erased shape
+`(descendantWhen: Any, descendantState: Any, parentState: ThisReducer.State, dependencies:
+Dependencies) -> ThisReducer.When?` and match the real descendant type inside the body with
+`is`/`as`, exactly like Swift's `MiddlewareReducer.updateSubstate<Child: Reducer>` does with its
+own `childWhen as? SomeReducer.When`. `:codegen-processor` validates the shape (parameter count,
+the two `Any` slots, the `State`/`Dependencies`/`When` types) the same way it validates
+`@OnChildAction`, and allows at most one such function per reducer (`ScopeConfig
+.onDescendantAction` is a single nullable slot, not one per child). Proven end to end —
+`SubScopeProcessorTest.testOnDescendantActionReachesAGrandchildWithNoRelayAtTheMiddleLevel` — a
+three-level `Root -> Middle -> Grandchild` tree where the middle reducer declares no
+`@OnChildAction` at all, and the root still sees the grandchild's tap directly.
+
+Both mechanisms coexist deliberately: `@OnChildAction` keeps its compile-time, per-child-type
+validation for the common direct-child case; `@OnDescendantAction` is the type-erased "see
+anything below me" escape hatch, same division of labor as the hand-written `SubScope
+.onChildAction`/`ScopeConfig.onDescendantAction` pair it generates.
 
 ## What's still real, hand-written work, and why
 
