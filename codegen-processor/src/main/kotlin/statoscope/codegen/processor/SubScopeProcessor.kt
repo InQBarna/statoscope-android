@@ -183,6 +183,10 @@ class SubScopeProcessor(
             "${reducerName.replaceFirstChar { it.lowercase() }}${slot.propertyName.replaceFirstChar { it.uppercase() }}SubScope"
         }
 
+        // `by lazy`, not an initializer: a child's `config` reads superstate keys declared in OTHER generated files, whose subScopes read the
+        // configs of this file's. With eager initializers, whichever file the JVM initialized first handed the others a half-built one (a
+        // `null` subScope in a `listOf`), and what broke depended on the order in which tests or screens touched the reducers. The keys stay
+        // plain vals: they depend on nothing.
         val subScopeDeclarations = slots.joinToString("\n\n") { slot ->
             val childReducerName = slot.childReducer.declaration.simpleName.asString()
             val childStateName = "$childReducerName.State"
@@ -192,7 +196,7 @@ class SubScopeProcessor(
                 ?: "null"
             val superstateKeyArg = if (slot in slotsNeedingSuperstateKey) superstateKeyName else "null"
             """
-            |val ${subScopeValNames.getValue(slot)}: SubScope<$stateName, $whenName, $childStateName, $childWhenName> =
+            |val ${subScopeValNames.getValue(slot)}: SubScope<$stateName, $whenName, $childStateName, $childWhenName> by lazy {
             |    SubScope(
             |        config = $childReducerName.config,
             |        get = { it.${slot.propertyName} },
@@ -200,6 +204,7 @@ class SubScopeProcessor(
             |        onChildAction = $onChildAction,
             |        superstateKey = $superstateKeyArg
             |    )
+            |}
             """.trimMargin()
         }
 

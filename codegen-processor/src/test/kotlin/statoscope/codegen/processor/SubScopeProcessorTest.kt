@@ -813,3 +813,18 @@ class SubScopeProcessorTest {
         )
     }
 }
+
+class GeneratedSubScopesAreLazyTest {
+
+    // A SubScope's config reads keys of other generated files, whose own SubScopes read this file's config: initialized eagerly, the first
+    // file touched left the others holding a half-built (null) SubScope, depending on the order in which things were first used.
+    @Test
+    fun testTheGeneratedSubScopeValsAreLazyDelegates() {
+        val generated = Class.forName("statoscope.codegen.processor.TestListReducer_ConfigKt")
+
+        assertTrue(
+            generated.declaredFields.any { it.name == "testListReducerSelectedArticleSubScope\$delegate" },
+            "fields: ${generated.declaredFields.map { it.name }}"
+        )
+    }
+}
