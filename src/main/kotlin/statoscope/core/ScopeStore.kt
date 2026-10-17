@@ -439,6 +439,11 @@ private class ScopeStoreImpl<State, When>(
                     "‼️ Exception after sending $action, swallowed: ${error.stackTraceToString()}"
                 }
             }
+            // After logging, and whoever threw: the app's error boundary (see UpdateErrorHandlerKey)
+            try {
+                dependencies.resolve(UpdateErrorHandlerKey)(error)
+            } catch (_: Throwable) {
+            }
         }
     }
 
