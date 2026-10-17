@@ -6,6 +6,7 @@ package statoscope.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class StateDiffTest {
 
@@ -42,5 +43,24 @@ class StateDiffTest {
     @Test
     fun testEmptyBeforeAgainstNonEmptyAfterIsAllAdditions() {
         assertEquals(listOf("+ a", "+ b"), diffLines(emptyList(), listOf("a", "b")))
+    }
+
+    @Test
+    fun testALargeDumpWithOneChangedLineDoesNotNeedAQuadraticTable() {
+        val before = List(200_000) { "line $it" }
+        val after = before.toMutableList().also { it[100_000] = "changed" }
+
+        assertEquals(listOf("- line 100000", "+ changed"), diffLines(before, after))
+    }
+
+    @Test
+    fun testTwoLargeDifferentDumpsStillDiffInLinearMemory() {
+        val before = List(20_000) { "a $it" }
+        val after = List(30_000) { "b $it" } + listOf("a 5")
+
+        val diff = diffLines(before, after)
+
+        assertEquals(20_000 - 1 + 30_000, diff.size)
+        assertTrue(diff.contains("- a 7") && diff.contains("+ b 29999") && !diff.contains("- a 5"))
     }
 }
