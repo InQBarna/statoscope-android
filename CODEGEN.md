@@ -178,3 +178,12 @@ reflected in an already-materialized `State` until the next `update()` runs. Pro
 `SubScopeProcessorTest` (`TestInjectedReducer`): the state holds the key's own default before any
 event, and a real `inject()`'d override after sending one — even one that never touches the
 annotated property itself.
+
+## `@ParentState` typed as an ancestor (2026-10-17)
+
+`@ParentState` is no longer limited to the direct parent: a property typed as the `State` of any ancestor reducer is a live read of
+that ancestor, the codegen stand-in for `@SuperState` at depth, **as a field of `State`** (what a UI collecting the child's state needs;
+`@SubState(provideSuperstate = true)` is the on-demand `dependencies.resolve(key)` read for `update()`). The processor walks up the `@SubState`
+chain (`ancestorsOf`) to the reducer whose `State` is the property's type — an error naming the nearest ancestor if none matches — and
+that reducer's `SuperstateKey` goes on the `@SubState` slot toward the descendant (`slotsNeedingSuperstateKey` now looks at the slot's whole
+subtree). Test: `SubScopeProcessorTest.testAParentStateTypedAsTheGrandparentIsLiveAtCreationAndAfterEveryChange`.

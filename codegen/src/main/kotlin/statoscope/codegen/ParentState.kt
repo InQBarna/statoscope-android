@@ -1,7 +1,7 @@
 package statoscope.codegen
 
 /**
- * Declares [State]'s annotated property as a *live* read of its direct parent's own state —
+ * Declares [State]'s annotated property as a *live* read of its parent's own state (or of any ANCESTOR's, see below) —
  * the codegen stand-in for Swift's `@SuperState var parent: ParentReducer.State`. Unlike
  * [ReducerInjected], this needs no string-named workaround: the property's own declared TYPE
  * (some other `@Reducer`'s `State`) is exactly what KSP matches on, the same way [SubState]
@@ -60,6 +60,11 @@ package statoscope.codegen
  * [OnChildAction]'s job — delegate the action, inject the read: the two mechanisms are
  * independent and commonly used together, matching how the hand-written `SubScope.onChildAction`/
  * `superstateKey` pair already works.
+ *
+ * **An ancestor above the parent** (added 2026-10-17): the property may be typed as the `State` of any ancestor reducer, not only the
+ * direct parent (Swift's `@SuperState` works at any depth). The processor walks up the `@SubState` chain to the reducer with that type, that
+ * reducer generates its `SuperstateKey` and wires it into the `@SubState` slot that leads to this descendant, so nothing is declared at the
+ * levels in between. Same liveness: pushed at activation and on every commit of that ancestor.
  */
 @Target(AnnotationTarget.PROPERTY)
 @Retention(AnnotationRetention.SOURCE)

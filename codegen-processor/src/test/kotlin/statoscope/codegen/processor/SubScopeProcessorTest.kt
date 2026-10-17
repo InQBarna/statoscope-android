@@ -344,6 +344,57 @@ object TestDropOnChildRootReducer {
         if (descendantWhen is TestBroadcastMiddleReducer.When.ActivateGrandchild) When.DropMiddle else null
 }
 
+// @ParentState typed as an ANCESTOR (the grandparent), skipping the level in between: the leaf's field is a live read of the root's state
+@Reducer
+object TestAncestorLeafReducer {
+    data class State(
+        val ownTaps: Int = 0,
+        @ParentState val root: TestAncestorRootReducer.State = TestAncestorRootReducer.State()
+    )
+
+    sealed interface When {
+        data object Tap : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.Tap -> state.copy(ownTaps = state.ownTaps + 1)
+        }
+}
+
+@Reducer
+object TestAncestorMiddleReducer {
+    data class State(@SubState val leaf: TestAncestorLeafReducer.State? = null)
+
+    sealed interface When {
+        data object CreateLeaf : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateLeaf -> state.copy(leaf = TestAncestorLeafReducer.State())
+        }
+}
+
+@Reducer
+object TestAncestorRootReducer {
+    data class State(
+        val counter: Int = 0,
+        @SubState val middle: TestAncestorMiddleReducer.State? = null
+    )
+
+    sealed interface When {
+        data object CreateMiddle : When
+        data object Increment : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateMiddle -> state.copy(middle = TestAncestorMiddleReducer.State())
+            When.Increment -> state.copy(counter = state.counter + 1)
+        }
+}
+
 // @SubState(provideSuperstate = true): a grandchild reads its GRANDPARENT's live state with dependencies.resolve(key), skipping the
 // middle reducer, which declares nothing (Swift's `@SuperState` at any depth).
 @Reducer
@@ -678,6 +729,30 @@ class SubScopeProcessorTest {
 
         assertEquals(null, root.state.middle, "the root dropped the subtree: neither the grandchild's nor the middle's mirror may put it back")
         assertEquals(null, root.childStore(testDropOnGrandchildRootReducerMiddleSubScope))
+    }
+
+    // MARK: - @ParentState typed as an ancestor
+
+    @Test
+    fun testAParentStateTypedAsTheGrandparentIsLiveAtCreationAndAfterEveryChange() {
+        val root = createScope(TestAncestorRootReducer.config)
+        root.send(TestAncestorRootReducer.When.Increment)
+        root.send(TestAncestorRootReducer.When.CreateMiddle)
+        val middle = root.childStore(testAncestorRootReducerMiddleSubScope)!!
+        middle.send(TestAncestorMiddleReducer.When.CreateLeaf)
+        val leaf = middle.childStore(testAncestorMiddleReducerLeafSubScope)!!
+        assertEquals(1, leaf.state.root.counter, "right at creation, with the root's current state")
+
+        root.send(TestAncestorRootReducer.When.Increment)
+        assertEquals(2, leaf.state.root.counter, "pushed from the root, past the middle level")
+        // What the UI reads: the leaf through its parent, the parent through the root
+        assertEquals(2, middle.state.leaf?.root?.counter)
+        assertEquals(2, root.state.middle?.leaf?.root?.counter)
+
+        leaf.send(TestAncestorLeafReducer.When.Tap)
+        assertEquals(1, leaf.state.ownTaps)
+        assertEquals(1, root.state.middle?.leaf?.ownTaps)
+        assertEquals(2, leaf.state.root.counter, "its own events don't lose the live value")
     }
 
     @Test

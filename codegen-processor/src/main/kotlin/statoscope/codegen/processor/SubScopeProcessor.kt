@@ -77,7 +77,7 @@ class SubScopeProcessor(
         }
 
         // Pass 2: generate, now that every reducer's identity (and @ParentState wiring) is known.
-        reducers.forEach { reducer -> generateConfig(reducer, byStateFqName, parentStateSlotByChildStateFqName) }
+        reducers.forEach { reducer -> generateConfig(reducer, reducers, byStateFqName, parentStateSlotByChildStateFqName, childToParent) }
 
         return emptyList()
     }
@@ -135,8 +135,10 @@ class SubScopeProcessor(
 
     private fun generateConfig(
         reducer: ReducerInfo,
+        reducers: List<ReducerInfo>,
         byStateFqName: Map<String, ReducerInfo>,
-        parentStateSlotByChildStateFqName: Map<String, ParentStateSlot?>
+        parentStateSlotByChildStateFqName: Map<String, ParentStateSlot?>,
+        childToParent: Map<String, ReducerInfo>
     ) {
         val reducerName = reducer.declaration.simpleName.asString()
         val stateName = "$reducerName.State"
@@ -162,9 +164,13 @@ class SubScopeProcessor(
         // cross-file lookup is needed to agree on the name, only on whether to emit the `val`
         // itself (only this, the parent's own file, does that).
         val superstateKeyName = "${reducerName.replaceFirstChar { it.lowercase() }}SuperstateKey"
+        // A @ParentState may name an ancestor above the direct parent: then the slot leading to that descendant carries the key.
         val slotsNeedingSuperstateKey = slots.filter { slot ->
-            slot.provideSuperstate ||
-                parentStateSlotByChildStateFqName[slot.childReducer.stateFqName]?.parentReducer?.stateFqName == reducer.stateFqName
+            slot.provideSuperstate || reducers.any { candidate ->
+                parentStateSlotByChildStateFqName[candidate.stateFqName]?.parentReducer?.stateFqName == reducer.stateFqName &&
+                    (candidate.stateFqName == slot.childReducer.stateFqName ||
+                        ancestorsOf(candidate, childToParent).any { it.stateFqName == slot.childReducer.stateFqName })
+            }
         }.toSet()
 
         // Each SubScope is its own stable, eagerly-initialized top-level `val` — NOT built
@@ -316,6 +322,17 @@ class SubScopeProcessor(
      * at all (never composed as any other reducer's `@SubState` child), or a property typed as
      * something other than that real parent's own `State`.
      */
+    /** The parent, the parent's parent... up to the root of the composition (a cycle can't be composed, but is cut anyway) */
+    private fun ancestorsOf(reducer: ReducerInfo, childToParent: Map<String, ReducerInfo>): List<ReducerInfo> {
+        val ancestors = mutableListOf<ReducerInfo>()
+        var current = childToParent[reducer.stateFqName]
+        while (current != null && ancestors.none { it.stateFqName == current!!.stateFqName }) {
+            ancestors += current
+            current = childToParent[current.stateFqName]
+        }
+        return ancestors
+    }
+
     private fun resolveParentStateSlot(reducer: ReducerInfo, childToParent: Map<String, ReducerInfo>): ParentStateSlot? {
         val annotated = reducer.stateClass.getDeclaredProperties()
             .filter { property -> property.annotations.any { it.shortName.asString() == "ParentState" } }
@@ -330,8 +347,8 @@ class SubScopeProcessor(
             return null
         }
         val property = annotated.single()
-        val parentReducer = childToParent[reducer.stateFqName]
-        if (parentReducer == null) {
+        val directParent = childToParent[reducer.stateFqName]
+        if (directParent == null) {
             logger.error(
                 "@ParentState on '${property.simpleName.asString()}': '${reducer.declaration.simpleName.asString()}' " +
                     "isn't declared as any other @Reducer's @SubState child, so it has no parent to read",
@@ -339,11 +356,13 @@ class SubScopeProcessor(
             )
             return null
         }
+        // The direct parent, or any ancestor above it: the property's own type says which
         val propertyTypeFqName = (property.type.resolve().declaration as? KSClassDeclaration)?.qualifiedName?.asString()
-        if (propertyTypeFqName != parentReducer.stateFqName) {
+        val parentReducer = ancestorsOf(reducer, childToParent).firstOrNull { it.stateFqName == propertyTypeFqName }
+        if (parentReducer == null) {
             logger.error(
-                "@ParentState property '${property.simpleName.asString()}' must be typed as its real parent, " +
-                    "${parentReducer.declaration.simpleName.asString()}.State — got '${property.type.resolve()}'",
+                "@ParentState property '${property.simpleName.asString()}' must be typed as the State of its parent or of one of its " +
+                    "ancestors (nearest is ${directParent.declaration.simpleName.asString()}.State) — got '${property.type.resolve()}'",
                 property
             )
             return null
