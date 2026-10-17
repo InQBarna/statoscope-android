@@ -261,7 +261,98 @@ object TestBroadcastRootReducer {
         if (descendantWhen is TestBroadcastGrandchildReducer.When.Tap) When.RecordGrandchildTap else null
 }
 
+// Ports Swift's DefaultTriggerReducerTests (`MiddlewareReducerTests.swift`): the child declares
+// `static var defaultTrigger: When? { .onAppear }` there, `val defaultTrigger: When?` here.
+@Reducer
+object TestDefaultTriggerChildReducer {
+    data class State(val initializeCount: Int = 0, val otherEventCount: Int = 0)
+
+    enum class When { OnAppear, SomeOtherEvent }
+
+    val defaultTrigger: When? = When.OnAppear
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.OnAppear -> state.copy(initializeCount = state.initializeCount + 1)
+            When.SomeOtherEvent -> state.copy(otherEventCount = state.otherEventCount + 1)
+        }
+}
+
+// Same shape, deliberately no defaultTrigger.
+@Reducer
+object TestNoDefaultTriggerChildReducer {
+    data class State(val initializeCount: Int = 0)
+
+    enum class When { OnAppear }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.OnAppear -> state.copy(initializeCount = state.initializeCount + 1)
+        }
+}
+
+@Reducer
+object TestDefaultTriggerParentReducer {
+    data class State(
+        @SubState val child: TestDefaultTriggerChildReducer.State? = null,
+        @SubState val plainChild: TestNoDefaultTriggerChildReducer.State? = null
+    )
+
+    enum class When { CreateChild, DestroyChild, CreatePlainChild }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateChild -> state.copy(child = TestDefaultTriggerChildReducer.State())
+            When.DestroyChild -> state.copy(child = null)
+            When.CreatePlainChild -> state.copy(plainChild = TestNoDefaultTriggerChildReducer.State())
+        }
+}
+
 class SubScopeProcessorTest {
+
+    // MARK: - defaultTrigger
+
+    @Test
+    fun testDefaultTriggerIsSentWhenChildIsWired() {
+        val root = createScope(TestDefaultTriggerParentReducer.config)
+        root.send(TestDefaultTriggerParentReducer.When.CreateChild)
+
+        val child = root.childStore(testDefaultTriggerParentReducerChildSubScope)!!
+        assertEquals(1, child.state.initializeCount, "defaultTrigger should fire exactly once on wiring")
+    }
+
+    @Test
+    fun testDefaultTriggerFiresOnlyOnce() {
+        val root = createScope(TestDefaultTriggerParentReducer.config)
+        root.send(TestDefaultTriggerParentReducer.When.CreateChild)
+        val child = root.childStore(testDefaultTriggerParentReducerChildSubScope)!!
+
+        child.send(TestDefaultTriggerChildReducer.When.SomeOtherEvent)
+        child.send(TestDefaultTriggerChildReducer.When.SomeOtherEvent)
+
+        assertEquals(1, child.state.initializeCount, "defaultTrigger fires only on wiring, not on subsequent events")
+        assertEquals(2, child.state.otherEventCount)
+    }
+
+    @Test
+    fun testDefaultTriggerFiresAgainWhenChildIsRecreated() {
+        val root = createScope(TestDefaultTriggerParentReducer.config)
+        root.send(TestDefaultTriggerParentReducer.When.CreateChild)
+        root.send(TestDefaultTriggerParentReducer.When.DestroyChild)
+        root.send(TestDefaultTriggerParentReducer.When.CreateChild)
+
+        val child = root.childStore(testDefaultTriggerParentReducerChildSubScope)!!
+        assertEquals(1, child.state.initializeCount, "a new child store gets its own defaultTrigger")
+    }
+
+    @Test
+    fun testNoDefaultTriggerForReducerWithoutIt() {
+        val root = createScope(TestDefaultTriggerParentReducer.config)
+        root.send(TestDefaultTriggerParentReducer.When.CreatePlainChild)
+
+        val child = root.childStore(testDefaultTriggerParentReducerPlainChildSubScope)!!
+        assertEquals(0, child.state.initializeCount, "no defaultTrigger means no automatic event")
+    }
 
     @Test
     fun testGeneratedConfigWiresThreeRealLevelsWithZeroHandWrittenSubScopes() {

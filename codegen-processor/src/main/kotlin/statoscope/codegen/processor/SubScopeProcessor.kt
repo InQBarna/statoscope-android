@@ -152,6 +152,7 @@ class SubScopeProcessor(
         val reducerInjectedSlots = resolveReducerInjectedSlots(reducer)
         val ownParentStateSlot = parentStateSlotByChildStateFqName[reducer.stateFqName]
         val onDescendantActionName = resolveOnDescendantAction(reducer)
+        val hasDefaultTrigger = resolveDefaultTrigger(reducer)
 
         // This reducer's own SuperstateKey<State> — generated here, in ITS OWN file, only if at
         // least one @SubState child actually declared @ParentState pointing back at it. Same
@@ -245,6 +246,8 @@ class SubScopeProcessor(
             ",\n        onDescendantAction = $reducerName::$name"
         } ?: ""
 
+        val defaultTriggerField = if (hasDefaultTrigger) ",\n        defaultTrigger = $reducerName.defaultTrigger" else ""
+
         val file = codeGenerator.createNewFile(
             dependencies = Dependencies(aggregating = true, *reducerObjectsFiles(reducer, slots)),
             packageName = packageName,
@@ -266,7 +269,7 @@ class SubScopeProcessor(
                 |    get() = ScopeConfig(
                 |        initial = $stateName(),
                 |        update = $updateBody,
-                |        subScopes = $subScopesBody$liveAncestorFields$onDescendantActionField
+                |        subScopes = $subScopesBody$liveAncestorFields$onDescendantActionField$defaultTriggerField
                 |    )
                 |
                 """.trimMargin()
@@ -450,6 +453,29 @@ class SubScopeProcessor(
         }
 
         return result
+    }
+
+    /**
+     * Whether [reducer] declares `val defaultTrigger: When?` (or `When`) — matched by name, the
+     * way Swift's `static var defaultTrigger: When?` is, with no annotation: it's a plain member
+     * of the reducer, not behavior to wire to some other symbol. The generated config then sets
+     * [statoscope.core.ScopeConfig.defaultTrigger] from it. A property of that name with any other
+     * type is a real KSP error — silently ignoring it would leave a child that never starts.
+     */
+    private fun resolveDefaultTrigger(reducer: ReducerInfo): Boolean {
+        val property = reducer.declaration.getDeclaredProperties()
+            .find { it.simpleName.asString() == "defaultTrigger" } ?: return false
+        val type = property.type.resolve()
+        if (type.declaration.qualifiedName?.asString() != reducer.whenFqName) {
+            logger.error(
+                "${reducer.declaration.simpleName.asString()}.defaultTrigger must be of type " +
+                    "${reducer.declaration.simpleName.asString()}.When or ${reducer.declaration.simpleName.asString()}.When? — " +
+                    "it becomes ScopeConfig.defaultTrigger",
+                property
+            )
+            return false
+        }
+        return true
     }
 
     /**

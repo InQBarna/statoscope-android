@@ -44,6 +44,12 @@ package statoscope.codegen
  *   breaking `data class` value semantics (a mutable-holder hack). It stays an explicit
  *   [statoscope.core.SuperstateKey] + `dependencies.resolve(key)` call inside `update()`.
  *
+ * A `val defaultTrigger: When?` declared on the object (matched by name, like Swift's
+ * `static var defaultTrigger: When?`) becomes the generated config's
+ * [statoscope.core.ScopeConfig.defaultTrigger]: an event dispatched once, automatically, right
+ * after this reducer is activated as a child. A property of that name whose type isn't this
+ * reducer's own `When` (nullable or not) is a KSP error.
+ *
  * One real, new requirement this imposes beyond what a hand-written `ScopeConfig` needs: every
  * `@Reducer`'s `State` must be no-arg-constructible (`State()` must compile) — the generated
  * `config`'s own `initial` needs a value, even though (same as [statoscope.core.SubScope.config]

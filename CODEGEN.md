@@ -117,6 +117,17 @@ validation for the common direct-child case; `@OnDescendantAction` is the type-e
 anything below me" escape hatch, same division of labor as the hand-written `SubScope
 .onChildAction`/`ScopeConfig.onDescendantAction` pair it generates.
 
+## `defaultTrigger` (2026-10-17) — `val defaultTrigger: When?` on the reducer
+
+Swift's `static var defaultTrigger: When? { .onAppear }` is, in the codegen path, a plain member of the
+`object`: `val defaultTrigger: When? = When.OnAppear`. Matched by **name** (no annotation — it's not
+behavior to wire to another symbol, like `@OnChildAction`), and the generated config sets
+`ScopeConfig.defaultTrigger = Reducer.defaultTrigger`. Its type must be the reducer's own `When`
+(nullable or not); anything else is a real KSP error pointing at the property — silently ignoring it
+would leave a child that never starts. Runtime semantics are `ScopeConfig.defaultTrigger`'s own (see its
+doc and `FEATURE_PARITY_MAP.md` row 28). Tests: `SubScopeProcessorTest.testDefaultTrigger*` /
+`testNoDefaultTriggerForReducerWithoutIt`, ports of Swift's `DefaultTriggerReducerTests`.
+
 ## What's still real, hand-written work, and why
 
 - Each reducer's own `State`/`When`/`update` body — real domain logic, same as Swift.
