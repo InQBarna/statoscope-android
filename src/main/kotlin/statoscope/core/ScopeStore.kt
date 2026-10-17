@@ -330,6 +330,13 @@ private class ScopeStoreImpl<State, When>(
     // and every level above it would keep the copy taken when the child was created.
     private var mirrorIntoParent: (() -> Unit)? = null
 
+    // False once the parent removed or replaced this store (see deactivateInstance), together with every store below it. An event of a
+    // store can make an ancestor remove that very store while the event is still being processed (an ancestor's onDescendantAction runs
+    // inside process(), before the middleware mirrors the state up): mirroring afterwards would write the removed child's state back
+    // into its parent and bring it back.
+    @Volatile
+    private var active = true
+
     // Activates any child already non-null in `config.initial` — covers a parent whose own
     // update() populates a child's state with an already-non-null grandchild (or deeper) in one
     // shot, rather than one level at a time across separate events the way every tutorial/
@@ -702,7 +709,8 @@ private class ScopeStoreImpl<State, When>(
         // our own. All three happen synchronously, inline with whatever called childStore.send()
         // — no separate async observation of the child's stateFlow, so a caller that sends to a
         // child and immediately reads the parent's state back sees it already reconciled.
-        childStore.mirrorIntoParent = {
+        childStore.mirrorIntoParent = mirror@{
+            if (!childStore.active) return@mirror
             // One lock at a time, released before moving up: an ancestor never holds a descendant's lock (see reDeriveFromLiveAncestor)
             synchronized(this) {
                 mutableStateFlow.value = subScope.set(mutableStateFlow.value, childStore.state)
@@ -747,7 +755,8 @@ private class ScopeStoreImpl<State, When>(
         // risk against the existing child-delegates-up path.
         childStore.config.liveAncestorKey?.let { key ->
             val owner = childStore.dependencies.findSuperstateOwnerOrNull(key)
-            val pushAndMirror: () -> Unit = {
+            val pushAndMirror: () -> Unit = push@{
+                if (!childStore.active) return@push
                 childStore.reDeriveFromLiveAncestor()
                 mutableStateFlow.update { current -> subScope.set(current, childStore.state) }
                 // The levels above this store hold a copy of this store's state too
@@ -776,6 +785,7 @@ private class ScopeStoreImpl<State, When>(
     // closure (which already overwrote the map entry with the replacement child, so it tears the
     // old instance down directly, never by key — see preActivateOne's own doc).
     private fun deactivateInstance(childStore: ScopeStoreImpl<*, *>) {
+        childStore.markInactiveRecursively()
         childStore.cancelAllRunningEffectsRecursively()
         childStore.liveAncestorUnregister?.invoke()
     }
@@ -785,6 +795,11 @@ private class ScopeStoreImpl<State, When>(
     // completion, call send() on a store nobody observes anymore. Recurses into the child's own
     // activeChildren first, so a grandchild's effects are cancelled too, before clearing this
     // level's own runningEffects.
+    private fun markInactiveRecursively() {
+        active = false
+        activeChildren.values.forEach { (it as? ScopeStoreImpl<*, *>)?.markInactiveRecursively() }
+    }
+
     @Synchronized
     private fun cancelAllRunningEffectsRecursively() {
         activeChildren.values.forEach { (it as? ScopeStoreImpl<*, *>)?.cancelAllRunningEffectsRecursively() }

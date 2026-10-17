@@ -302,6 +302,48 @@ object TestBroadcastRootReducer {
         if (descendantWhen is TestBroadcastGrandchildReducer.When.Tap) When.RecordGrandchildTap else null
 }
 
+// Reducers that remove their child as a REACTION to something that child (or one of its children) just did: the child's state must not
+// be copied back into the parent after it was removed, which would bring the removed child back.
+@Reducer
+object TestDropOnGrandchildRootReducer {
+    data class State(@SubState val middle: TestBroadcastMiddleReducer.State? = null)
+
+    sealed interface When {
+        data object ActivateMiddle : When
+        data object DropMiddle : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.ActivateMiddle -> state.copy(middle = TestBroadcastMiddleReducer.State())
+            is When.DropMiddle -> state.copy(middle = null)
+        }
+
+    @OnDescendantAction
+    fun onAnyDescendantAction(descendantWhen: Any, descendantState: Any, parentState: State, dependencies: Dependencies): When? =
+        if (descendantWhen is TestBroadcastGrandchildReducer.When.Tap) When.DropMiddle else null
+}
+
+@Reducer
+object TestDropOnChildRootReducer {
+    data class State(@SubState val middle: TestBroadcastMiddleReducer.State? = null)
+
+    sealed interface When {
+        data object ActivateMiddle : When
+        data object DropMiddle : When
+    }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            is When.ActivateMiddle -> state.copy(middle = TestBroadcastMiddleReducer.State())
+            is When.DropMiddle -> state.copy(middle = null)
+        }
+
+    @OnDescendantAction
+    fun onAnyDescendantAction(descendantWhen: Any, descendantState: Any, parentState: State, dependencies: Dependencies): When? =
+        if (descendantWhen is TestBroadcastMiddleReducer.When.ActivateGrandchild) When.DropMiddle else null
+}
+
 // @SubState(provideSuperstate = true): a grandchild reads its GRANDPARENT's live state with dependencies.resolve(key), skipping the
 // middle reducer, which declares nothing (Swift's `@SuperState` at any depth).
 @Reducer
@@ -610,6 +652,32 @@ class SubScopeProcessorTest {
         assertEquals(leaf.state, middle.state.leaf, "the middle level mirrors the pushed leaf")
         assertEquals(leaf.state, root.state.middle?.leaf, "the root mirrors the pushed leaf too")
         assertEquals(1, root.state.middle?.counter)
+    }
+
+    @Test
+    fun testADirectChildEventThatMakesTheParentDropItDoesNotBringItBack() {
+        val root = createScope(TestDropOnChildRootReducer.config)
+        root.send(TestDropOnChildRootReducer.When.ActivateMiddle)
+        val middle = root.childStore(testDropOnChildRootReducerMiddleSubScope)!!
+
+        middle.send(TestBroadcastMiddleReducer.When.ActivateGrandchild)
+
+        assertEquals(null, root.state.middle, "the parent dropped its child: the child's own mirror must not put it back")
+        assertEquals(null, root.childStore(testDropOnChildRootReducerMiddleSubScope))
+    }
+
+    @Test
+    fun testAGrandchildEventThatMakesTheRootDropTheSubtreeDoesNotBringItBack() {
+        val root = createScope(TestDropOnGrandchildRootReducer.config)
+        root.send(TestDropOnGrandchildRootReducer.When.ActivateMiddle)
+        val middle = root.childStore(testDropOnGrandchildRootReducerMiddleSubScope)!!
+        middle.send(TestBroadcastMiddleReducer.When.ActivateGrandchild)
+        val grandchild = middle.childStore(testBroadcastMiddleReducerGrandchildSubScope)!!
+
+        grandchild.send(TestBroadcastGrandchildReducer.When.Tap)
+
+        assertEquals(null, root.state.middle, "the root dropped the subtree: neither the grandchild's nor the middle's mirror may put it back")
+        assertEquals(null, root.childStore(testDropOnGrandchildRootReducerMiddleSubScope))
     }
 
     @Test
