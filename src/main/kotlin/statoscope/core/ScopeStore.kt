@@ -324,6 +324,12 @@ private class ScopeStoreImpl<State, When>(
     // descendants of the same owner are registered at once.
     private var liveAncestorUnregister: (() -> Unit)? = null
 
+    // Copies this store's current state into its field of the parent's state, then asks the parent to do the same into ITS parent, and so
+    // on to the root (set when the parent activates this child, see finishActivatingChild). Raw state writes, not send(): they must never
+    // run reducers or trigger a reassignment-driven recreate. Without the walk up, only the direct parent would mirror a child's change,
+    // and every level above it would keep the copy taken when the child was created.
+    private var mirrorIntoParent: (() -> Unit)? = null
+
     // Activates any child already non-null in `config.initial` — covers a parent whose own
     // update() populates a child's state with an already-non-null grandchild (or deeper) in one
     // shot, rather than one level at a time across separate events the way every tutorial/
@@ -696,11 +702,16 @@ private class ScopeStoreImpl<State, When>(
         // our own. All three happen synchronously, inline with whatever called childStore.send()
         // — no separate async observation of the child's stateFlow, so a caller that sends to a
         // child and immediately reads the parent's state back sees it already reconciled.
+        childStore.mirrorIntoParent = {
+            // One lock at a time, released before moving up: an ancestor never holds a descendant's lock (see reDeriveFromLiveAncestor)
+            synchronized(this) {
+                mutableStateFlow.value = subScope.set(mutableStateFlow.value, childStore.state)
+            }
+            this.mirrorIntoParent?.invoke()
+        }
         childStore.addMiddleware { store, action, forward ->
             forward(action)
-            synchronized(this) {
-                mutableStateFlow.value = subScope.set(mutableStateFlow.value, store.state)
-            }
+            childStore.mirrorIntoParent?.invoke()
             val delegated = subScope.onChildAction?.invoke(action, store.state, dependencies)
             if (delegated != null) send(delegated)
         }
@@ -736,9 +747,11 @@ private class ScopeStoreImpl<State, When>(
         // risk against the existing child-delegates-up path.
         childStore.config.liveAncestorKey?.let { key ->
             val owner = childStore.dependencies.findSuperstateOwnerOrNull(key)
-            val pushAndMirror = {
+            val pushAndMirror: () -> Unit = {
                 childStore.reDeriveFromLiveAncestor()
                 mutableStateFlow.update { current -> subScope.set(current, childStore.state) }
+                // The levels above this store hold a copy of this store's state too
+                this.mirrorIntoParent?.invoke()
             }
             if (owner != null) {
                 owner.registerLiveDependent(pushAndMirror)

@@ -161,6 +161,47 @@ object TestInjectedParentReducer {
         }
 }
 
+// Three levels where the LEAF holds a live @ParentState: a change of the middle level pushes into the leaf and is mirrored back up, and
+// the root must see that too (the second path that writes a child's state into its parent's field, next to a child's own send()).
+@Reducer
+object TestLivePushLeafReducer {
+    data class State(
+        @ParentState val middle: TestLivePushMiddleReducer.State = TestLivePushMiddleReducer.State()
+    )
+
+    enum class When { Noop }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State = state
+}
+
+@Reducer
+object TestLivePushMiddleReducer {
+    data class State(
+        val counter: Int = 0,
+        @SubState val leaf: TestLivePushLeafReducer.State? = null
+    )
+
+    enum class When { CreateLeaf, Increment }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateLeaf -> state.copy(leaf = TestLivePushLeafReducer.State())
+            When.Increment -> state.copy(counter = state.counter + 1)
+        }
+}
+
+@Reducer
+object TestLivePushRootReducer {
+    data class State(@SubState val middle: TestLivePushMiddleReducer.State? = null)
+
+    enum class When { CreateMiddle }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateMiddle -> state.copy(middle = TestLivePushMiddleReducer.State())
+        }
+}
+
 // @ParentState — the real-world motivation: a leaf reading data a sibling level up (here,
 // `favorites`) actually owns, without the UI having to plumb it down by hand as an extra
 // parameter (the exact seam `statoscope-kotlin-examples`' NewsFeedArticleScreen/favoritesCount
@@ -531,6 +572,69 @@ class SubScopeProcessorTest {
             "a @ParentState property should reflect a later parent-level change with no event " +
                 "sent to the child at all"
         )
+    }
+
+    // MARK: - State consistency across levels
+
+    // Every store's state must contain, in its @SubState field, the CURRENT state of the child store under it — at every level, after
+    // every event. A mirror that only reaches the direct parent leaves the root (and anything reading through it, like a UI collecting the
+    // parent's state) showing the grandchild as it was when it was created.
+    @Test
+    fun testAGrandchildsEventIsMirroredAllTheWayUpToTheRoot() {
+        val root = createScope(TestBroadcastRootReducer.config)
+        root.send(TestBroadcastRootReducer.When.ActivateMiddle)
+        val middle = root.childStore(testBroadcastRootReducerMiddleSubScope)!!
+        middle.send(TestBroadcastMiddleReducer.When.ActivateGrandchild)
+        val grandchild = middle.childStore(testBroadcastMiddleReducerGrandchildSubScope)!!
+        assertEquals(false, root.state.middle?.grandchild?.tapped)
+
+        grandchild.send(TestBroadcastGrandchildReducer.When.Tap)
+
+        assertEquals(true, grandchild.state.tapped)
+        assertEquals(true, middle.state.grandchild?.tapped, "the direct parent mirrors its child")
+        assertEquals(true, root.state.middle?.grandchild?.tapped, "the root mirrors its grandchild too")
+        assertEquals(middle.state, root.state.middle, "the root's copy of the middle store is the middle store's state")
+    }
+
+    @Test
+    fun testALivePushIntoALeafIsMirroredUpToTheRootToo() {
+        val root = createScope(TestLivePushRootReducer.config)
+        root.send(TestLivePushRootReducer.When.CreateMiddle)
+        val middle = root.childStore(testLivePushRootReducerMiddleSubScope)!!
+        middle.send(TestLivePushMiddleReducer.When.CreateLeaf)
+        val leaf = middle.childStore(testLivePushMiddleReducerLeafSubScope)!!
+
+        middle.send(TestLivePushMiddleReducer.When.Increment)
+
+        assertEquals(1, leaf.state.middle.counter, "the leaf's @ParentState follows the middle level")
+        assertEquals(leaf.state, middle.state.leaf, "the middle level mirrors the pushed leaf")
+        assertEquals(leaf.state, root.state.middle?.leaf, "the root mirrors the pushed leaf too")
+        assertEquals(1, root.state.middle?.counter)
+    }
+
+    @Test
+    fun testTheWholeTreeStaysConsistentAfterEveryEventAtAnyLevel() {
+        val root = createScope(TestBroadcastRootReducer.config)
+        fun assertConsistent(step: String) {
+            val middle = root.childStore(testBroadcastRootReducerMiddleSubScope)
+            assertEquals(middle?.state, root.state.middle, "root vs middle after $step")
+            val grandchild = middle?.childStore(testBroadcastMiddleReducerGrandchildSubScope)
+            assertEquals(grandchild?.state, middle?.state?.grandchild, "middle vs grandchild after $step")
+            assertEquals(grandchild?.state, root.state.middle?.grandchild, "root vs grandchild after $step")
+        }
+        assertConsistent("creation")
+        root.send(TestBroadcastRootReducer.When.ActivateMiddle)
+        assertConsistent("activating the middle")
+        val middle = root.childStore(testBroadcastRootReducerMiddleSubScope)!!
+        middle.send(TestBroadcastMiddleReducer.When.ActivateGrandchild)
+        assertConsistent("activating the grandchild")
+        middle.childStore(testBroadcastMiddleReducerGrandchildSubScope)!!.send(TestBroadcastGrandchildReducer.When.Tap)
+        assertConsistent("the grandchild's tap")
+        // The root's own event (also an @OnDescendantAction's result) must not undo what the levels below mirrored up
+        assertEquals(1, root.state.grandchildTapsSeenAtRoot)
+        root.send(TestBroadcastRootReducer.When.RecordGrandchildTap)
+        assertConsistent("a root event")
+        assertEquals(true, root.state.middle?.grandchild?.tapped)
     }
 
     // MARK: - @OnDescendantAction
