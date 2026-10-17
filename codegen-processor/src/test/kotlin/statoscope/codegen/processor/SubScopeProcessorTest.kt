@@ -261,6 +261,48 @@ object TestBroadcastRootReducer {
         if (descendantWhen is TestBroadcastGrandchildReducer.When.Tap) When.RecordGrandchildTap else null
 }
 
+// @SubState(provideSuperstate = true): a grandchild reads its GRANDPARENT's live state with dependencies.resolve(key), skipping the
+// middle reducer, which declares nothing (Swift's `@SuperState` at any depth).
+@Reducer
+object TestSkipLeafReducer {
+    data class State(val seenRoot: Int = -1)
+
+    enum class When { ReadRoot }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.ReadRoot -> state.copy(seenRoot = dependencies.resolve(testSkipRootReducerSuperstateKey).counter)
+        }
+}
+
+@Reducer
+object TestSkipMiddleReducer {
+    data class State(@SubState val leaf: TestSkipLeafReducer.State? = null)
+
+    enum class When { CreateLeaf }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateLeaf -> state.copy(leaf = TestSkipLeafReducer.State())
+        }
+}
+
+@Reducer
+object TestSkipRootReducer {
+    data class State(
+        val counter: Int = 0,
+        @SubState(provideSuperstate = true) val middle: TestSkipMiddleReducer.State? = null
+    )
+
+    enum class When { CreateMiddle, Increment }
+
+    fun update(state: State, action: When, effects: EffectsState<When>, dependencies: Dependencies): State =
+        when (action) {
+            When.CreateMiddle -> state.copy(middle = TestSkipMiddleReducer.State())
+            When.Increment -> state.copy(counter = state.counter + 1)
+        }
+}
+
 // Ports Swift's DefaultTriggerReducerTests (`MiddlewareReducerTests.swift`): the child declares
 // `static var defaultTrigger: When? { .onAppear }` there, `val defaultTrigger: When?` here.
 @Reducer
@@ -309,6 +351,27 @@ object TestDefaultTriggerParentReducer {
 }
 
 class SubScopeProcessorTest {
+
+    // MARK: - @SubState(provideSuperstate = true)
+
+    @Test
+    fun testAGrandchildReadsItsGrandparentsLiveStateSkippingTheMiddleLevel() {
+        val root = createScope(TestSkipRootReducer.config)
+        root.send(TestSkipRootReducer.When.Increment)
+        root.send(TestSkipRootReducer.When.CreateMiddle)
+        val middle = root.childStore(testSkipRootReducerMiddleSubScope)!!
+        middle.send(TestSkipMiddleReducer.When.CreateLeaf)
+        val leaf = middle.childStore(testSkipMiddleReducerLeafSubScope)!!
+
+        leaf.send(TestSkipLeafReducer.When.ReadRoot)
+        assertEquals(1, leaf.state.seenRoot, "the leaf sees the root's counter as it is now")
+
+        // The root changes AFTER the leaf exists: the read is live, not a snapshot taken at activation
+        root.send(TestSkipRootReducer.When.Increment)
+        root.send(TestSkipRootReducer.When.Increment)
+        leaf.send(TestSkipLeafReducer.When.ReadRoot)
+        assertEquals(3, leaf.state.seenRoot, "and a later read sees the new value")
+    }
 
     // MARK: - defaultTrigger
 

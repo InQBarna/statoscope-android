@@ -117,6 +117,18 @@ validation for the common direct-child case; `@OnDescendantAction` is the type-e
 anything below me" escape hatch, same division of labor as the hand-written `SubScope
 .onChildAction`/`ScopeConfig.onDescendantAction` pair it generates.
 
+## `@SubState(provideSuperstate = true)` (2026-10-17) — an ancestor's live state, at any depth
+
+The documented limitation above ("a `SubScope` that also needs a `superstateKey` can't be expressed through the annotations") is
+closed for the case that matters: a reducer's *whole subtree* reading its live state. Swift's `@SuperState` works at any depth;
+`@ParentState` only covers the direct parent, as a `State` field. `@SubState(provideSuperstate = true)` generates the owner's
+`val <reducerName>SuperstateKey: SuperstateKey<State>` (the same key a direct child's `@ParentState` already causes) and wires it as the
+connecting `SubScope.superstateKey`, so any descendant below that child resolves it with `dependencies.resolve(key)` inside
+`update()` — live at the moment of the call, however many levels up the owner is, with nothing declared at the levels in between.
+It is an on-demand read, not a `State` field: nothing re-renders from it (use `@ParentState` for the direct parent when the UI needs
+that). Tests: `SubScopeProcessorTest.testAGrandchildReadsItsGrandparentsLiveStateSkippingTheMiddleLevel`, with the root changing after
+the leaf exists.
+
 ## `defaultTrigger` (2026-10-17) — `val defaultTrigger: When?` on the reducer
 
 Swift's `static var defaultTrigger: When? { .onAppear }` is, in the codegen path, a plain member of the

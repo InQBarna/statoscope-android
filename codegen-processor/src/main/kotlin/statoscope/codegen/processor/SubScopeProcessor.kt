@@ -49,7 +49,7 @@ class SubScopeProcessor(
         val whenFqName: String get() = whenClass.qualifiedName!!.asString()
     }
 
-    private data class ChildSlot(val propertyName: String, val childReducer: ReducerInfo)
+    private data class ChildSlot(val propertyName: String, val childReducer: ReducerInfo, val provideSuperstate: Boolean = false)
 
     private data class ReducerInjectedSlot(val propertyName: String, val keyName: String)
 
@@ -155,14 +155,16 @@ class SubScopeProcessor(
         val hasDefaultTrigger = resolveDefaultTrigger(reducer)
 
         // This reducer's own SuperstateKey<State> — generated here, in ITS OWN file, only if at
-        // least one @SubState child actually declared @ParentState pointing back at it. Same
+        // least one @SubState child actually declared @ParentState pointing back at it, or asked for it with
+        // @SubState(provideSuperstate = true) (a descendant of ANY depth then resolves it with dependencies.resolve(key)). Same
         // naming convention wherever it's referenced from (here, and from each such child's own
         // generated update() wrapper below) — a pure function of this reducer's name, so no
         // cross-file lookup is needed to agree on the name, only on whether to emit the `val`
         // itself (only this, the parent's own file, does that).
         val superstateKeyName = "${reducerName.replaceFirstChar { it.lowercase() }}SuperstateKey"
         val slotsNeedingSuperstateKey = slots.filter { slot ->
-            parentStateSlotByChildStateFqName[slot.childReducer.stateFqName]?.parentReducer?.stateFqName == reducer.stateFqName
+            slot.provideSuperstate ||
+                parentStateSlotByChildStateFqName[slot.childReducer.stateFqName]?.parentReducer?.stateFqName == reducer.stateFqName
         }.toSet()
 
         // Each SubScope is its own stable, eagerly-initialized top-level `val` — NOT built
@@ -365,7 +367,10 @@ class SubScopeProcessor(
             )
             return null
         }
-        return ChildSlot(propertyName = property.simpleName.asString(), childReducer = childReducer)
+        val provideSuperstate = property.annotations
+            .find { it.shortName.asString() == "SubState" }
+            ?.arguments?.find { it.name?.asString() == "provideSuperstate" }?.value as? Boolean ?: false
+        return ChildSlot(propertyName = property.simpleName.asString(), childReducer = childReducer, provideSuperstate = provideSuperstate)
     }
 
     /**
