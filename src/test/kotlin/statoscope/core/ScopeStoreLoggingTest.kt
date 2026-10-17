@@ -151,4 +151,54 @@ class ScopeStoreLoggingTest {
         assertTrue(effectMessages.any { it.contains("↗") }, "expected an enqueue log, got: $effectMessages")
         assertTrue(effectMessages.any { it.contains("↩") }, "expected a completion log, got: $effectMessages")
     }
+
+    // Regression: describing an effect that held a Firestore-backed provider used to throw inside launchEffect, so the update's
+    // remaining effects were never launched (and send() swallowed the exception). Here the first effect holds a cycle and a
+    // property that throws; the second must still launch and complete.
+    private class Holder(var other: Holder? = null) {
+        val broken: Int get() = error("unreadable")
+    }
+
+    private class HolderEffect(val holder: Holder, private val result: LogTestWhen) : Effect<LogTestWhen> {
+        override suspend fun run(): LogTestWhen = result
+    }
+
+    private fun twoEffectsConfig(first: Effect<LogTestWhen>) = ScopeConfig<LogTestState, LogTestWhen>(
+        initial = LogTestState(),
+        update = { state, action, effects, _ ->
+            when (action) {
+                is LogTestWhen.Increment -> {
+                    effects.enqueue(first)
+                    effects.enqueue(EchoEffect(LogTestWhen.EffectFired))
+                    state.copy(count = state.count + 1)
+                }
+                else -> state.copy(count = state.count + 10)
+            }
+        }
+    )
+
+    @Test
+    fun testAnEffectWhoseDescriptionCyclesOrThrowsDoesNotStopTheOthersFromLaunching() = runTest {
+        installCapture()
+        val holder = Holder().also { it.other = it }
+
+        val store = createScope(twoEffectsConfig(HolderEffect(holder, LogTestWhen.EffectFired)), effectScope = this)
+        store.send(LogTestWhen.Increment)
+        advanceUntilIdle()
+
+        val launched = captured.filter { it.first == LogLevel.Effects && it.second.contains("↗") }
+        assertEquals(2, launched.size, "both effects must launch, got: $launched")
+        assertEquals(21, store.state.count) // Increment (+1) and the two EffectFired completions (+10 each)
+    }
+
+    @Test
+    fun testALogSinkThatThrowsDoesNotStopEffectsFromLaunching() = runTest {
+        StatoscopeLogger.logReplacement = { level, _ -> if (level == LogLevel.Effects) error("sink failure") }
+
+        val store = createScope(twoEffectsConfig(EchoEffect(LogTestWhen.EffectFired)), effectScope = this)
+        store.send(LogTestWhen.Increment)
+        advanceUntilIdle()
+
+        assertEquals(21, store.state.count)
+    }
 }
