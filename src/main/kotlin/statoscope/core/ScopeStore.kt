@@ -425,10 +425,20 @@ private class ScopeStoreImpl<State, When>(
                 process(action)
             }
         } catch (error: Throwable) {
-            // Already logged inside process(). Swallowed here, at the outermost, app-facing
-            // layer, so one throwing event can't crash whatever called send() — matching
-            // Swift's real send() contract. A middleware's own try/catch around forward(action)
-            // (see addMiddleware) still runs first and can intercept before it ever reaches here.
+            // Swallowed here, at the outermost, app-facing layer, so one throwing event can't
+            // crash whatever called send() — matching Swift's real send() contract. A
+            // middleware's own try/catch around forward(action) (see addMiddleware) still runs
+            // first and can intercept before it ever reaches here.
+            //
+            // An exception from config.update is already logged inside process(); anything
+            // thrown AFTER the update (deactivating a child, notifying an ancestor, a
+            // middleware, an onChildAction) was not, and vanished without a trace: an app whose
+            // state change half-happened looked as if nothing had been sent at all.
+            if (error !== lastLoggedUpdateError) {
+                StatoscopeLogger.log(LogLevel.Errors, logPrefix) {
+                    "‼️ Exception after sending $action, swallowed: ${error.stackTraceToString()}"
+                }
+            }
         }
     }
 
@@ -436,6 +446,9 @@ private class ScopeStoreImpl<State, When>(
     // reaching whichever addMiddleware closure called it — the try { forward(when) } catch
     // { ... } shape that error-handling middleware relies on — before send()'s own outer catch
     // (above) swallows anything a middleware didn't already handle itself.
+    // The last exception config.update threw, already logged by process(): send() must not log it a second time
+    private var lastLoggedUpdateError: Throwable? = null
+
     private fun process(action: When) {
         val effects = MutableEffectsState<When>(
             ongoing = runningEffects.entries.map { (id, running) -> id to running.pristine }
@@ -450,6 +463,7 @@ private class ScopeStoreImpl<State, When>(
         val newState = try {
             config.update(state, action, effects, dependencies)
         } catch (error: Throwable) {
+            lastLoggedUpdateError = error
             StatoscopeLogger.log(LogLevel.Errors, logPrefix) { "‼️ Exception on send: $error" }
             throw error
         }
@@ -511,8 +525,11 @@ private class ScopeStoreImpl<State, When>(
             val result = try {
                 effect.run()
             } catch (error: Throwable) {
-                StatoscopeLogger.log(LogLevel.Effects, logPrefix) {
-                    "🪃 💥 [$id] Unhandled throw: ${describeObject(effect)}\nError: $error"
+                // A cancelled effect (its store was deactivated, or it was replaced) is not an error
+                if (error !is kotlinx.coroutines.CancellationException) {
+                    StatoscopeLogger.log(LogLevel.Effects, logPrefix) {
+                        "🪃 💥 [$id] Unhandled throw: ${describeObject(effect)}\nError: $error"
+                    }
                 }
                 synchronized(this@ScopeStoreImpl) { runningEffects.remove(id) }
                 throw error
@@ -829,8 +846,12 @@ private class ScopeStoreImpl<State, When>(
 
     @Synchronized
     private fun cancelAllRunningEffectsRecursively() {
-        activeChildren.values.forEach { (it as? ScopeStoreImpl<*, *>)?.cancelAllRunningEffectsRecursively() }
-        runningEffects.values.forEach { it.job?.cancel() }
+        activeChildren.values.toList().forEach { (it as? ScopeStoreImpl<*, *>)?.cancelAllRunningEffectsRecursively() }
+        // Cancelling can resume an effect's coroutine right here (an immediate dispatcher), and that removes the effect from
+        // runningEffects: iterate a copy, taken after emptying the map, not the map itself (a ConcurrentModificationException here
+        // aborted the logout of the app half way, after its state had changed and before its effect was launched)
+        val jobs = runningEffects.values.mapNotNull { it.job }
         runningEffects.clear()
+        jobs.forEach { it.cancel() }
     }
 }
