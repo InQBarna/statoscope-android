@@ -82,7 +82,8 @@ class DescribeObjectTest {
 
     private class Unreadable {
         val fine = 1
-        val broken: Int get() = error("boom")
+        var getterCalls = 0
+        val computed: Int get() { getterCalls++; error("boom") }
     }
 
     @Test
@@ -101,10 +102,12 @@ class DescribeObjectTest {
     }
 
     @Test
-    fun testAPropertyThatThrowsIsReportedAndTheRestStillPrints() {
-        val text = describeObject(Unreadable())
+    fun testAComputedPropertyIsNeverRunBecauseOnlyStoredFieldsAreDescribed() {
+        val subject = Unreadable()
+        val text = describeObject(subject)
         assert(text.contains("fine: 1")) { text }
-        assert(text.contains("broken: <unreadable:")) { text }
+        assert(!text.contains("computed")) { text }
+        assertEquals(0, subject.getterCalls)
     }
 
     @Test

@@ -1,7 +1,6 @@
 package statoscope.core
 
-import kotlin.reflect.full.memberProperties
-import kotlin.reflect.jvm.isAccessible
+import java.lang.reflect.Modifier
 
 private const val INDENT = "  "
 
@@ -70,29 +69,39 @@ private fun describeMap(value: Map<*, *>, indent: String, context: DescribeConte
  */
 private fun isKotlinType(value: Any): Boolean = value.javaClass.isAnnotationPresent(Metadata::class.java)
 
+/**
+ * Java reflection on the declared fields, not kotlin-reflect's `memberProperties`: that one builds descriptors for EVERY member of the
+ * class and its supertypes (functions included) before returning, which on a device took seconds and hundreds of MB for the types an
+ * effect holds, freezing the main thread inside a log call. It also ran computed getters (a `val firestore get() = ...`). Fields are a
+ * constructor's properties and their stored state, which is all a state dump is for. Sorted by name, as before, so the lines of two
+ * dumps of one type line up for [diffLines].
+ */
 private fun describeReflective(value: Any, indent: String, context: DescribeContext): String {
     if (!isKotlinType(value)) return safely { value.toString() }
-    val kClass = value::class
-    val typeName = kClass.simpleName ?: "Unknown"
-    val properties = try {
-        kClass.memberProperties.toList()
+    val typeName = value.javaClass.simpleName.ifEmpty { "Unknown" }
+    val fields = try {
+        generateSequence<Class<*>>(value.javaClass) { it.superclass }
+            .takeWhile { it != Any::class.java }
+            .flatMap { it.declaredFields.asSequence() }
+            .filter { !Modifier.isStatic(it.modifiers) && !it.isSynthetic && !it.name.contains('$') }
+            .sortedBy { it.name }
+            .toList()
     } catch (error: Throwable) {
         return "$typeName(<unreadable: $error>)"
     }
-    if (properties.isEmpty()) return typeName
+    if (fields.isEmpty()) return typeName
 
     val childIndent = indent + INDENT
-    val fields = properties.joinToString("\n") { property ->
+    val lines = fields.joinToString("\n") { field ->
         val text = try {
-            property.isAccessible = true
-            @Suppress("UNCHECKED_CAST")
-            describe((property as kotlin.reflect.KProperty1<Any, *>).get(value), childIndent, context)
+            field.isAccessible = true
+            describe(field.get(value), childIndent, context)
         } catch (error: Throwable) {
             "<unreadable: $error>"
         }
-        "$childIndent${property.name}: $text"
+        "$childIndent${field.name}: $text"
     }
-    return "$typeName(\n$fields\n$indent)"
+    return "$typeName(\n$lines\n$indent)"
 }
 
 private inline fun safely(block: () -> String): String = try {
