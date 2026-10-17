@@ -38,6 +38,16 @@ object StatoscopeLogger {
      * [level] itself is enabled.
      */
     fun log(level: LogLevel, prefix: String = "", message: () -> String) {
+        // Logging must never change what the store does: a message that can't be built (a dump hitting something unreadable) is
+        // reported as such, not thrown into the code that was only trying to log
+        try {
+            logUnguarded(level, prefix, message)
+        } catch (error: Exception) {
+            System.err.println(format(prefix, "⚠️ Could not build a log message: $error"))
+        }
+    }
+
+    private fun logUnguarded(level: LogLevel, prefix: String, message: () -> String) {
         val replacement = logReplacement
         when {
             replacement != null -> replacement(level, format(prefix, message()))

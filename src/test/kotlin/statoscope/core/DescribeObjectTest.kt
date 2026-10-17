@@ -77,4 +77,38 @@ class DescribeObjectTest {
         val differingLines = before.indices.count { before[it] != after[it] }
         assertEquals(1, differingLines, "only the y field's line should differ")
     }
+
+    private class Node(var next: Node? = null, val label: String = "n")
+
+    private class Unreadable {
+        val fine = 1
+        val broken: Int get() = error("boom")
+    }
+
+    @Test
+    fun testACycleIsCutInsteadOfOverflowingTheStack() {
+        val a = Node(label = "a")
+        a.next = Node(next = a, label = "b")
+        val text = describeObject(a)
+        assert(text.contains("<cycle: Node>")) { text }
+    }
+
+    @Test
+    fun testAVeryDeepStructureIsElided() {
+        var chain = Node(label = "end")
+        repeat(100) { chain = Node(chain, "n") }
+        assert(describeObject(chain).contains("too deep"))
+    }
+
+    @Test
+    fun testAPropertyThatThrowsIsReportedAndTheRestStillPrints() {
+        val text = describeObject(Unreadable())
+        assert(text.contains("fine: 1")) { text }
+        assert(text.contains("broken: <unreadable:")) { text }
+    }
+
+    @Test
+    fun testANonKotlinObjectPrintsAsItsToStringWithoutWalkingItsFields() {
+        assertEquals("a-b", describeObject(StringBuilder("a-b")))
+    }
 }
