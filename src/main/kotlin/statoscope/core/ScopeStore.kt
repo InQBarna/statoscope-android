@@ -330,6 +330,10 @@ private class ScopeStoreImpl<State, When>(
     // and every level above it would keep the copy taken when the child was created.
     private var mirrorIntoParent: (() -> Unit)? = null
 
+    // The parent's state without this store's field (set with mirrorIntoParent). Lets a @ParentState snapshot leave out the branch that
+    // leads to the store reading it: see reDeriveFromLiveAncestor.
+    private var parentStateWithoutThisChild: ((parentState: Any?) -> Any?)? = null
+
     // False once the parent removed or replaced this store (see deactivateInstance), together with every store below it. An event of a
     // store can make an ancestor remove that very store while the event is still being processed (an ancestor's onDescendantAction runs
     // inside process(), before the middleware mirrors the state up): mirroring afterwards would write the removed child's state back
@@ -594,10 +598,31 @@ private class ScopeStoreImpl<State, When>(
     // concurrent send() on this exact store could still interleave with this write (the existing,
     // already-accepted class of risk for any unsynchronized concurrent StateFlow write — not a
     // new one this introduces).
+    //
+    // What the child receives is the owner's state WITHOUT the branch that leads down to this very child (the owner's field for the
+    // first step towards it). The branch is the child's own state, which holds the previous snapshot, which holds the branch with the
+    // snapshot before: every event would add a level, a chain growing without limit (in memory, and in the log dump, which doubled on
+    // each event until the process ran out of memory). A child wants the ancestor's data, not its own subtree.
     internal fun reDeriveFromLiveAncestor() {
         val derive = config.deriveFromLiveAncestor ?: return
-        mutableStateFlow.update { current -> derive(current, dependencies) }
+        val derivationDependencies = object : Dependencies by dependencies {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T> resolve(key: SuperstateKey<T>): T =
+                if (key === config.liveAncestorKey) ownerStateWithoutTheBranchToThisChild(key) as T else dependencies.resolve(key)
+        }
+        mutableStateFlow.update { current -> derive(current, derivationDependencies) }
         notifyLiveDependents()
+    }
+
+    private fun ownerStateWithoutTheBranchToThisChild(key: SuperstateKey<*>): Any? {
+        val owner = dependencies.findSuperstateOwnerOrNull(key) ?: return dependencies.resolve(key)
+        var step: ScopeStoreImpl<*, *> = this
+        while (true) {
+            val above = step.parent ?: return owner.state
+            if (above === owner) break
+            step = above
+        }
+        return step.parentStateWithoutThisChild?.invoke(owner.state) ?: owner.state
     }
 
     // One declared SubScope's non-null→null transition tears its current child down with no
@@ -709,6 +734,8 @@ private class ScopeStoreImpl<State, When>(
         // our own. All three happen synchronously, inline with whatever called childStore.send()
         // — no separate async observation of the child's stateFlow, so a caller that sends to a
         // child and immediately reads the parent's state back sees it already reconciled.
+        @Suppress("UNCHECKED_CAST")
+        childStore.parentStateWithoutThisChild = { parentState -> subScope.set(parentState as State, null) }
         childStore.mirrorIntoParent = mirror@{
             if (!childStore.active) return@mirror
             // One lock at a time, released before moving up: an ancestor never holds a descendant's lock (see reDeriveFromLiveAncestor)

@@ -37,6 +37,10 @@ package statoscope.codegen
  * performs the moment the parent commits ANY new state of its own — including activation itself,
  * before this reducer has processed a single event.
  *
+ * **The ancestor's state this property holds leaves out the branch that leads down to this reducer** (the ancestor's field for the first
+ * step towards it, `null` there): that branch is this reducer's own state, which would hold the previous copy, which would hold the
+ * branch with the copy before it, a chain growing by a full copy of the ancestor on every event. Read what the ancestor itself owns.
+ *
  * **This means an `@ParentState` property is genuinely live** — closer to Swift's own
  * `@SuperState`-plus-`observed:true` guarantee than the earlier "fresh as of the last cycle"
  * design this replaced. Reading `state.list.favorites.size` from *inside* this reducer's own
