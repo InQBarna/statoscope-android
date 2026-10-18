@@ -96,10 +96,10 @@ data class ScopeConfig<State, When>(
      * config is activated as a child (see [ScopeStoreImpl.activateChild]) — ports Swift's
      * `Reducer.defaultTrigger` (`Reducer.swift`): `static var defaultTrigger: When? { .onAppear }`.
      * The common "fetch as soon as this scope exists" case this replaces: before this existed,
-     * the UI layer had to send that first event itself (`statoscope-kotlin-examples`'
-     * `NewsFeedScreens.kt` used a Compose `LaunchedEffect(listStore) { listStore.send(...) }` for
-     * exactly this, worth revisiting now that this exists) — a responsibility that belongs to
-     * the reducer declaring what it needs on creation, not to whichever UI happens to render it.
+     * the UI layer had to send that first event itself (a Compose
+     * `LaunchedEffect(listStore) { listStore.send(...) }` was the usual way) — a responsibility
+     * that belongs to the reducer declaring what it needs on creation, not to whichever UI
+     * happens to render it.
      *
      * Deliberately a *fixed* value, not a function of [dependencies][Dependencies] or anything
      * else — if the trigger's own handling needs to resolve something, it does that the normal

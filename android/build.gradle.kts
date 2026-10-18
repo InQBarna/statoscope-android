@@ -30,8 +30,8 @@ dependencies {
 
     // Compose RUNTIME only (@Composable, State<T>, collectAsState) — deliberately not
     // compose-ui/material3/activity-compose, which pull in the Android framework and need AGP.
-    // This module stays plain Kotlin/JVM (see MIGRATION_NOTES.md in statoscope-kotlin-examples
-    // for why AGP doesn't mix well inside this build) — androidx.compose.runtime itself is a
+    // This module stays plain Kotlin/JVM (AGP needs a Kotlin and Gradle pairing that doesn't mix
+    // well with the rest of this build) — androidx.compose.runtime itself is a
     // pure Kotlin/JVM (Compose Multiplatform) artifact, no Android dependency needed to compile
     // against it. The Kotlin Compose compiler plugin above is likewise AGP-independent.
     api("androidx.compose.runtime:runtime:1.9.4")

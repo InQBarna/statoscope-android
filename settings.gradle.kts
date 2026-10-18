@@ -48,15 +48,14 @@ include(":android")
 // all); :codegen-processor is only ever needed on a module's `ksp` configuration, never
 // `implementation`. Neither depends on the root project — the processor validates/emits against
 // fully-qualified name strings, never actual Kotlin types from here, so applying KSP downstream
-// (an app module, statoscope-kotlin-examples) needs no build-time link back to this repo beyond
-// the ordinary "statoscope:statoscope-kotlin:0.1.0" dependency the generated code itself expects
-// at compile time. Neither is applied to any module in this build — like :testing/:android, this
+// (an app module) needs no build-time link back to this repo beyond the ordinary
+// "com.inqbarna.statoscope:statoscope-kotlin" dependency the generated code itself expects at
+// compile time. Neither is applied to any module in this build — like :testing/:android, this
 // is a library capability for consumers to opt into, not something the tutorials themselves use.
 include(":codegen")
 include(":codegen-processor")
-// examples/todolist/android needed AGP + a Kotlin version old enough to pair with it, which
-// dragged this whole build down to Gradle 8.13 and caused real, repeated tooling breakage when
-// nested here (see ../statoscope-kotlin-examples/MIGRATION_NOTES.md for the full story). Moved
-// examples entirely to a sibling Gradle project, ../statoscope-kotlin-examples/, connected back
-// to this library via a composite build (its settings.gradle.kts includeBuild(...)s this one) —
-// this project no longer knows examples exist at all.
+// Sample apps live in their own Gradle projects, outside this one: an Android app needs AGP and a
+// Kotlin version old enough to pair with it, which dragged this whole build down to an old Gradle
+// and caused repeated tooling breakage when nested here. They reach this library through a
+// composite build (`includeBuild(...)` in their own settings.gradle.kts, see the README) —
+// this project doesn't know they exist.

@@ -56,9 +56,8 @@ package statoscope.codegen
  * re-stamp-after-`update()` design always rendered one tap behind whatever its own tap just
  * caused. With the push-based cascade, the moment the parent's `ToggledFavorite` handling commits
  * the new `favorites` list, this child gets pushed the fresh value synchronously, within that
- * same call — before anything else observes either store. `NewsFeedArticleScreen` in
- * `statoscope-kotlin-examples` can read `state.list.favorites.size` directly again; it no longer
- * needs `favoritesCount` threaded down by hand.
+ * same call — before anything else observes either store. A leaf screen can read
+ * `state.list.favorites.size` directly; it no longer needs `favoritesCount` threaded down by hand.
  *
  * Reacting to the child's own events (rather than reading the parent's state) is still
  * [OnChildAction]'s job — delegate the action, inject the read: the two mechanisms are

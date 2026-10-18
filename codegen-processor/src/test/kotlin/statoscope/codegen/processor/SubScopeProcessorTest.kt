@@ -204,8 +204,7 @@ object TestLivePushRootReducer {
 
 // @ParentState — the real-world motivation: a leaf reading data a sibling level up (here,
 // `favorites`) actually owns, without the UI having to plumb it down by hand as an extra
-// parameter (the exact seam `statoscope-kotlin-examples`' NewsFeedArticleScreen/favoritesCount
-// has today). Matched by TYPE — no string-named workaround needed, unlike @ReducerInjected.
+// parameter (a news-feed article screen being handed `favoritesCount`, say). Matched by TYPE — no string-named workaround needed, unlike @ReducerInjected.
 @Reducer
 object TestParentStateChildReducer {
     data class State(

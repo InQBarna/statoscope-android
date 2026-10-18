@@ -4,7 +4,7 @@
 //
 // Stress-tests StoreTestPlan.kt's actual composition machinery, beyond StoreTestPlanTest.kt's
 // single with()/pop() hop: a real 3-level tree (Root -> List -> Article, the same shape as
-// statoscope-kotlin-examples' newsfeed app), effects enqueued and completed at two different
+// a typical news-feed app), effects enqueued and completed at two different
 // levels bubbling through two separate onChildAction hops, withProvide proven to actually reach
 // a real reducer's dependencies.resolve() call, and with() failing at the correct depth when an
 // intermediate level is active but a deeper one isn't — the case a single-hop test can't tell

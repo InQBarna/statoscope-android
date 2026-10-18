@@ -16,9 +16,8 @@ only (`build.gradle.kts`'s `kspTest(project(":codegen-processor"))`), backing
 domain as Tutorial 05, rebuilt with these annotations, side by side with the hand-written version
 for direct comparison. The library's own **main** sources still have no KSP dependency at all;
 `docs/05-Scopes.md` and its `SubScope(...)`-by-hand example stay as the primary reference/teaching
-path, with Advanced/02 as the "here's the shorter version" follow-up. Not yet applied in
-`statoscope-kotlin-examples` or any app module — a consumer there adds the same two lines
-Advanced/02's own `build.gradle.kts` entry does.
+path, with Advanced/02 as the "here's the shorter version" follow-up. A consumer adds the same two
+lines Advanced/02's own `build.gradle.kts` entry does.
 
 **Found while building Advanced/02**: a `SubScope` that also needs a `superstateKey` can't be
 expressed through the annotations at all today — `@SubState` never attaches one (see "Design

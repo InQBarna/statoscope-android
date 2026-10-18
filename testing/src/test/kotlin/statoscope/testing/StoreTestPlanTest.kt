@@ -5,8 +5,8 @@
 // Exercises the composed-tree DSL (StoreTestPlan.kt) end to end: real navigation via with()/pop(),
 // real dispatch via on(), real effect completion simulation via onOldestEffectCompletes(), and a
 // child event bubbling back up to its parent via onChildAction — the exact "favorite toggle
-// bubbles up" shape statoscope-kotlin-examples' newsfeed Android app was manually verified for on
-// a real emulator this session, now automated.
+// bubbles up" shape of a news-feed app, which was first verified by hand on an emulator and is
+// now automated.
 //
 package statoscope.testing
 
