@@ -1,0 +1,58 @@
+# A release is a tag X.Y.Z on a commit of main whose VERSION in gradle.properties is X.Y.Z. Pushing the tag:
+#   1. checks both, and runs the tests;
+#   2. asks JitPack to build the tag (the first request for an artifact starts the build) and waits until it is served;
+#   3. creates the GitHub release with the notes of that version in CHANGELOG.md.
+# JitPack serves com.github.InQBarna.statoscope-android:<module>:<tag>. Maven Central would replace step 2 (see README.md).
+name: Release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The tag is on main and is the version in gradle.properties
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
+          VERSION=$(sed -n 's/^VERSION=//p' gradle.properties)
+          [ "$VERSION" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME, but VERSION in gradle.properties is $VERSION"; exit 1; }
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test
+        run: ./gradlew test publishToMavenLocal
+
+      - name: Ask JitPack to build the tag and wait for it
+        run: |
+          BASE="https://jitpack.io/com/github/InQBarna/statoscope-android"
+          POM="$BASE/statoscope-kotlin/$GITHUB_REF_NAME/statoscope-kotlin-$GITHUB_REF_NAME.pom"
+          for attempt in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$POM")
+            if [ "$code" = "200" ]; then echo "JitPack serves $GITHUB_REF_NAME"; exit 0; fi
+            echo "attempt $attempt: HTTP $code"
+            sleep 20
+          done
+          echo "::error::JitPack did not serve $GITHUB_REF_NAME in 30 minutes"
+          curl -s "$BASE/$GITHUB_REF_NAME/build.log" | tail -60
+          exit 1
+
+      - name: GitHub release with the notes of this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v v="$GITHUB_REF_NAME" '$0 == "## " v {found=1; next} /^## /{found=0} found' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "No changelog entry for $GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
