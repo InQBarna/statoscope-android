@@ -15,6 +15,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Tests take a few minutes and JitPack's first build of a tag, 10 to 20: a stuck JitPack must not hold the runner for the default 6 hours
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
