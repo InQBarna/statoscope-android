@@ -26,7 +26,7 @@ package statoscope.codegen
  * single generic entry point a broadcast could invoke uniformly the way Swift's can. Adopting
  * Swift's broadcast would mean widening `onChildAction` to something type-erased (`Any`/`is`
  * checks), giving up the compile-time validation this design was built for. Kept as one hop plus
- * explicit relay, on purpose — see `PARITY_AUDIT.md`'s entry on this for the fuller reasoning.
+ * explicit relay, on purpose — see the parity review's entry on this for the fuller reasoning.
  *
  * This design — type-matched, KSP-validated functions rather than one name-matched or
  * signature-sniffed function — replaced an earlier version of this idea that matched by an

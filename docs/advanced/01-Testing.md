@@ -10,7 +10,7 @@
 > mirrored here. Swift's own testing-patterns tutorial (`01-06-Testing`) sits as the last item in
 > a single flat chapter alongside everything else, and doesn't actually teach the
 > `WHEN_EffectCompletes`-style mapping-aware completion this article covers (see
-> `PARITY_AUDIT.md`'s Issue 6) — it's real framework capability on the Swift side, just not
+> the parity review's issue 6) — it's real framework capability on the Swift side, just not
 > documented in a tutorial there either. Advanced articles assume you've already read Tutorials
 > 01–05; they go beyond "how the pieces fit together" into "how to test them well."
 
@@ -234,7 +234,7 @@ class NewsFeedListIntegrationTest {
 `StoreTestPlan` has one more tool not shown above: `withProvide(entries)`, called before any
 `with()`, overrides a *root* config's `InjectionKey`s for the test — the composed-tree equivalent
 of `TestPlan.withProvide`. `InjectionKey` resolution walks the ancestor chain (see
-`PARITY_AUDIT.md`'s Issue 9), so this override reaches every descendant's `dependencies.resolve()`
+the parity review's issue 9), so this override reaches every descendant's `dependencies.resolve()`
 calls too, not just the root's own, unless an intermediate level's own `provide` overrides the
 same key first — same nearest-ancestor-wins precedence as `SuperstateKey`. See
 `StoreTestPlanCompositionTest.kt` for a worked example.

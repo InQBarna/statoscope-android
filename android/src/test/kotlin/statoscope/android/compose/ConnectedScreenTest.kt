@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 /**
  * [ConnectedScreen]/[ConnectedChild] previously had zero unit tests — only device/emulator
  * verification — despite `:android` being pure Kotlin/JVM with no Android framework dependency
- * (see `TEST_PARITY_MAP.md`, gap 5). Molecule drives these plain `@Composable` functions off a
+ * (see the test-parity review, gap 5). Molecule drives these plain `@Composable` functions off a
  * real `Recomposer`, with no compose-ui and no device, the same way `:android` itself only needs
  * `androidx.compose.runtime` to compile against.
  *

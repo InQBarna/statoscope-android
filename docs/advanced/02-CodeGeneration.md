@@ -266,5 +266,5 @@ class CodeGenerationIntegrationTest {
 - **Multi-level reach today is still one hop plus relay**, same as the hand-written path — an
   intermediate reducer's own `@OnChildAction` has to relay a child's event unchanged, wrapped in
   its own `When`, for a grandparent to react to it directly. `ScopeConfig.onDescendantAction` is
-  the broadcast-reaching alternative (`PARITY_AUDIT.md`'s Issue 7); it has no codegen annotation
+  the broadcast-reaching alternative (the parity review's issue 7); it has no codegen annotation
   yet, so it's wired by hand on whichever reducer needs it.

@@ -1073,7 +1073,7 @@ class ScopeStoreTest {
         )
     }
 
-    // TEST_PARITY_MAP.md #3 / Swift's ReducerUpdateSubstateErrorTests.
+    // the test-parity review #3 / Swift's ReducerUpdateSubstateErrorTests.
     // testUpdateSubstateIsNotCalledWhenGrandchildThrows: a throwing descendant update() must
     // pre-empt onDescendantAction entirely — not deliver it a partial/stale descendantState, not
     // leave some ancestors notified and others not. Reading ScopeStoreImpl.process()/

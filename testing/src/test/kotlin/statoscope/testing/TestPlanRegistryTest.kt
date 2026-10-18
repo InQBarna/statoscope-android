@@ -4,7 +4,7 @@
 //
 // Direct unit tests of the registry mechanism itself, isolated from the real JUnit extension
 // integration (proven separately, by hand, with a deliberately-sabotaged test during
-// development — see PARITY_AUDIT.md's Issue 5).
+// development — see the parity review's issue 5).
 //
 package statoscope.testing
 

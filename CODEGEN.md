@@ -99,7 +99,7 @@ reflecting it two levels up
 
 For genuine, Swift-style broadcast reach — a grandparent seeing a grandchild's raw event directly,
 with zero relay at any intermediate level — use **`@OnDescendantAction`** (added after
-`PARITY_AUDIT.md`'s Issue 7/`TEST_PARITY_MAP.md` closed the hand-written `ScopeConfig
+the parity review's issue 7 and the test-parity review closed the hand-written `ScopeConfig
 .onDescendantAction` field): mark one function per reducer with the type-erased shape
 `(descendantWhen: Any, descendantState: Any, parentState: ThisReducer.State, dependencies:
 Dependencies) -> ThisReducer.When?` and match the real descendant type inside the body with
@@ -137,7 +137,7 @@ behavior to wire to another symbol, like `@OnChildAction`), and the generated co
 `ScopeConfig.defaultTrigger = Reducer.defaultTrigger`. Its type must be the reducer's own `When`
 (nullable or not); anything else is a real KSP error pointing at the property — silently ignoring it
 would leave a child that never starts. Runtime semantics are `ScopeConfig.defaultTrigger`'s own (see its
-doc and `FEATURE_PARITY_MAP.md` row 28). Tests: `SubScopeProcessorTest.testDefaultTrigger*` /
+doc and the feature-parity review, row 28). Tests: `SubScopeProcessorTest.testDefaultTrigger*` /
 `testNoDefaultTriggerForReducerWithoutIt`, ports of Swift's `DefaultTriggerReducerTests`.
 
 ## What's still real, hand-written work, and why

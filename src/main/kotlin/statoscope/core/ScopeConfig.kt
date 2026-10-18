@@ -108,7 +108,7 @@ data class ScopeConfig<State, When>(
      * Fires for every activation, not just the ones reached through a normal one-field-at-a-time
      * `update()` transition — including a child that arrives already non-null as part of a
      * parent's own initial construction (see [ScopeStoreImpl]'s init-time activation, Issue 10 in
-     * `PARITY_AUDIT.md`) — a deliberate choice, not a strict port of Swift's own recursive
+     * the parity review) — a deliberate choice, not a strict port of Swift's own recursive
      * `triggerDefaults: false` suppression for that case: "this child now exists" is true either
      * way, and firing uniformly is simpler to reason about than firing only sometimes depending
      * on how the child came to exist. Never fires for a plain [createScope] root (nothing to be

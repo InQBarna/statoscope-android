@@ -25,7 +25,7 @@ package statoscope.codegen
  *
  * Does not replace [OnChildAction] — a reducer can declare both: [OnChildAction] for a specific,
  * compile-time-validated direct child reaction, [OnDescendantAction] for the broader "see
- * anything, anywhere below me" case. See `PARITY_AUDIT.md`'s Issue 7 for the full history of why
+ * anything, anywhere below me" case. See the parity review's issue 7 for the full history of why
  * the hand-written `ScopeConfig.onDescendantAction` field exists, and `CODEGEN.md` for why this
  * annotation stayed unwritten until now.
  */

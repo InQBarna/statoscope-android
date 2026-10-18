@@ -101,7 +101,7 @@ private val rootConfig = ScopeConfig<RootState, RootWhen>(
 // --- A separate, minimal fixture just for withProvide — kept apart from the 3-level tree above
 // since it's a different concern (injection, not child-event bubbling), not because the override
 // can't reach a descendant: InjectionKey resolution now walks the ancestor chain (see
-// PARITY_AUDIT.md's ancestor-tree DI entry), so withProvide's override — applied to the ROOT's
+// the parity review's ancestor-tree DI entry), so withProvide's override — applied to the ROOT's
 // own config.provide, see RootStoreTestPlan.runTest() — reaches every descendant's
 // dependencies.resolve() too, not just the root's own, as proven by
 // testWithProvideReachesAChildsDependenciesResolveToo below. ---

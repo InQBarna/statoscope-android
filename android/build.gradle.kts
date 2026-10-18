@@ -41,7 +41,7 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     // Drives ConnectedScreen/ConnectedChild (plain @Composable functions) off a Recomposer with
     // no Android framework and no compose-ui — exactly the gap this module's own doc comments
-    // flag (TEST_PARITY_MAP.md: these had zero unit tests despite needing no device/emulator).
+    // flag (test-parity review: these had zero unit tests despite needing no device/emulator).
     // Pure Kotlin/JVM, like androidx.compose.runtime itself; no AGP or compose-ui pulled in.
     testImplementation("app.cash.molecule:molecule-runtime:2.0.0")
 }
