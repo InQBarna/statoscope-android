@@ -1,0 +1,5 @@
+# JitPack builds a tag with this and serves the modules as com.github.InQBarna.statoscope-android:<module>:<tag>
+jdk:
+  - openjdk21
+install:
+  - ./gradlew -x test publishToMavenLocal

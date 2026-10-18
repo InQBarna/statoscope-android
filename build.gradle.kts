@@ -7,8 +7,10 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
-group = "statoscope"
-version = "3.0.0"
+group = property("GROUP") as String
+version = property("VERSION") as String
+
+apply(from = rootProject.file("gradle/publishing.gradle.kts"))
 
 repositories {
     mavenCentral()
