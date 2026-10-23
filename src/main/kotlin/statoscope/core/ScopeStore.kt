@@ -261,7 +261,11 @@ private fun Dependencies.findSuperstateOwnerOrNull(key: SuperstateKey<*>): Scope
 private class ScopeStoreImpl<State, When>(
     private val config: ScopeConfig<State, When>,
     private val effectScope: CoroutineScope,
-    inheritedDependencies: Dependencies?
+    inheritedDependencies: Dependencies?,
+    // True for a store created by its parent's process() before that parent publishes its new state: the descendants already present in
+    // `config.initial` are then registered at construction but finished (middleware, live-ancestor push, defaultTrigger) only after
+    // the publish, see runPendingInitFinishes
+    private val deferInitActivation: Boolean = false
 ) : ScopeStore<State, When> {
 
     // Named, not inlined into `dependencies` below, so `inject()` has something to mutate.
@@ -354,13 +358,33 @@ private class ScopeStoreImpl<State, When>(
     // multi-level pre-populated hierarchy activates recursively for free: each activateChild
     // call below constructs a new ScopeStoreImpl, which runs this same init block for ITS OWN
     // subScopes in turn.
+    private val pendingInitFinishes = mutableListOf<() -> Unit>()
+
     init {
         config.subScopes.forEach { subScope -> activateIfAlreadyPresent(subScope) }
     }
 
     private fun <ChildState, ChildWhen> activateIfAlreadyPresent(subScope: SubScope<State, When, ChildState, ChildWhen>) {
         val initialChild = subScope.get(config.initial) ?: return
-        activateChild(subScope, initialChild)
+        if (!deferInitActivation) {
+            activateChild(subScope, initialChild)
+            return
+        }
+        // The state this store is being created from is not published by its ancestors yet: a defaultTrigger fired now would read the
+        // ancestors' previous state through @SuperState (Swift's child sees the new one). Registered now, finished after the publish.
+        val childStore = createChildAndRegister(subScope, initialChild, deferInitActivation = true)
+        pendingInitFinishes += {
+            finishActivatingChild(subScope, childStore)
+            childStore.runPendingInitFinishes()
+        }
+    }
+
+    // Parent first, then its own pre-populated children, in declaration order: a child's mirror and live-ancestor push walk up through
+    // callbacks its parent installs when it finishes.
+    private fun runPendingInitFinishes() {
+        val finishes = pendingInitFinishes.toList()
+        pendingInitFinishes.clear()
+        finishes.forEach { finish -> finish() }
     }
 
     override fun addMiddleware(middleware: Middleware<State, When>): ScopeStore<State, When> {
@@ -706,10 +730,11 @@ private class ScopeStoreImpl<State, When>(
         if (previousChild === currentChild) return null
         @Suppress("UNCHECKED_CAST")
         val replacedChildStore = activeChildren[subScope] as? ScopeStoreImpl<ChildState, ChildWhen>
-        val childStore = createChildAndRegister(subScope, currentChild)
+        val childStore = createChildAndRegister(subScope, currentChild, deferInitActivation = true)
         return {
             replacedChildStore?.let(::deactivateInstance)
             finishActivatingChild(subScope, childStore)
+            childStore.runPendingInitFinishes()
         }
     }
 
@@ -728,7 +753,8 @@ private class ScopeStoreImpl<State, When>(
 
     private fun <ChildState, ChildWhen> createChildAndRegister(
         subScope: SubScope<State, When, ChildState, ChildWhen>,
-        initial: ChildState
+        initial: ChildState,
+        deferInitActivation: Boolean = false
     ): ScopeStoreImpl<ChildState, ChildWhen> {
         val superstateChain: Dependencies = subScope.superstateKey?.let { key ->
             SuperstateDependencies(dependencies, key, owner = this)
@@ -737,7 +763,8 @@ private class ScopeStoreImpl<State, When>(
         val childStore = ScopeStoreImpl(
             subScope.config.copy(initial = initial),
             effectScope,
-            inheritedDependencies = superstateChain
+            inheritedDependencies = superstateChain,
+            deferInitActivation = deferInitActivation
         )
         childStore.parent = this
         // Registered here, as soon as the child exists — see preActivateNewChildren's own doc for

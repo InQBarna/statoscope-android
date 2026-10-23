@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Fixes
+- A descendant already present in the state of a child created by `update()` (a grandchild pre-populated in the same update) is now
+  finished (middleware, live-ancestor push, `defaultTrigger`) after the ancestors publish their new state, parent first. Its
+  `defaultTrigger` used to run while the ancestors still held the previous state, so a `SuperstateKey` read saw stale data
+  (Swift's `@SuperState` sees the new one).
+
 ## 3.1.0
 
 New API
